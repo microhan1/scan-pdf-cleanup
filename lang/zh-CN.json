@@ -11,7 +11,9 @@
   "msg_done": "完成：已处理 {count} 个文件",
   "warn_text_pdf": "这不是扫描件。仍要继续吗？",
   "err_password": "此文件已加密",
-
+  "err_empty_pdf": "此文件没有页面：{name}",
+  "err_file_failed": "处理失败，已跳过：{name}（{error}）",
+  "err_no_pdf_found": "未找到PDF文件",
   "lbl_language": "语言",
   "lbl_files": "文件列表",
   "btn_add_files": "添加文件",
@@ -51,7 +53,6 @@
   "log_saved": "已保存：{path}",
   "log_page_failed": "{name} 第 {page} 页处理失败，保留原页：{error}",
   "log_cancelled": "已中止：{name}（未生成输出）",
-
   "cli_desc": "将发黄模糊的扫描PDF处理为白底黑字。不带输入运行时打开图形界面。",
   "cli_inputs": "PDF文件或文件夹（可多个）",
   "cli_whiten": "背景变白强度 0-100，省略则自动",

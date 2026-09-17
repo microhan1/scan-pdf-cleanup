@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import os
 import threading
 import time
@@ -25,11 +26,26 @@ MODES = ("color", "gray", "bw")
 DPIS = (150, 200, 300)
 WHITEN_AUTO = -1
 
-# contrast level -> (black point, gamma). Higher gamma darkens midtones.
-_CONTRAST = {"low": (15, 1.25), "mid": (35, 1.6), "high": (60, 2.1)}
+# contrast level -> (ink alpha, gamma). Alpha slides the black point from the
+# ink cluster toward the ink/paper split: higher means bolder, blacker text.
+# Gamma darkens what is left in between.
+_CONTRAST = {"low": (0.15, 1.25), "mid": (0.35, 1.6), "high": (0.60, 2.1)}
+_FALLBACK_BLACK = 35.0  # used when a page has no ink to measure
+_INK_PERCENTILE = 1.0  # percentile of a page taken to sit inside ink strokes
+_MIN_WINDOW = 18.0  # narrowest black-to-white span the tone curve may use
+_EDGE_MARGIN = 0.06  # page edge ignored when measuring: shadows and rims live there
+_DENOISE_WINDOW = 45.0  # below this span the stretch would amplify paper grain
 JPEG_QUALITY = 85
 MAX_DESKEW_ANGLE = 5.0
 LARGE_PAGE_COUNT = 500
+# A page bigger than this is rendered at a lower dpi so one page cannot
+# exhaust memory. 30 Mpx covers A3 at 300 dpi.
+MAX_PIXELS = 30_000_000
+# Row bands are sized by pixel budget: an ordinary page is one band (fast),
+# only an outsized one is split (bounded memory).
+_BLOCK_PIXELS = 8_000_000
+_MAX_GAIN = 1.8  # ceiling on background lift, so dark figures are not blown out
+_BG_TARGET = 240  # working width for the background estimate, in pixels
 
 
 class Cancelled(Exception):
@@ -38,6 +54,10 @@ class Cancelled(Exception):
 
 class PasswordRequired(Exception):
     """The PDF is encrypted and no (or a wrong) password was given."""
+
+
+class EmptyDocument(Exception):
+    """The PDF has no pages, so there is nothing to clean."""
 
 
 @dataclass
@@ -119,9 +139,21 @@ def output_path_for(input_path: str) -> str:
     return candidate
 
 
+def effective_dpi(page: pymupdf.Page, dpi: int, max_pixels: int = MAX_PIXELS) -> int:
+    """Lower the render dpi for outsized pages (posters, plans) so a single
+    page cannot exhaust memory. Normal book pages are returned unchanged."""
+    pixels = (page.rect.width / 72.0 * dpi) * (page.rect.height / 72.0 * dpi)
+    if pixels <= max_pixels or pixels <= 0:
+        return dpi
+    reduced = max(36, int(dpi * math.sqrt(max_pixels / pixels)))
+    log.info("page %s is %.0f Mpx at %d dpi; rendering at %d dpi instead",
+             getattr(page, "number", "?"), pixels / 1e6, dpi, reduced)
+    return reduced
+
+
 def render_page(page: pymupdf.Page, dpi: int, mode: str) -> Image.Image:
     cs = pymupdf.csRGB if mode == "color" else pymupdf.csGRAY
-    pix = page.get_pixmap(dpi=dpi, colorspace=cs, alpha=False)
+    pix = page.get_pixmap(dpi=effective_dpi(page, dpi), colorspace=cs, alpha=False)
     pil_mode = "RGB" if mode == "color" else "L"
     return Image.frombytes(pil_mode, (pix.width, pix.height), pix.samples)
 
@@ -135,30 +167,107 @@ def _downscale(gray: np.ndarray, target: int) -> Image.Image:
 
 
 def estimate_background(channel: np.ndarray) -> np.ndarray:
-    """Smooth estimate of the paper color for one uint8 channel."""
+    """Smooth estimate of the paper color for one uint8 channel.
+
+    Measured on a small copy, since lighting varies slowly: two 3x3 maximum
+    passes reach as far as one 7x7 on a larger copy, agree with it to within
+    two levels, and cost a tenth as much. Kept as uint8, because a float copy
+    of a full page would cost four times the memory."""
     h, w = channel.shape
-    small = _downscale(channel, 400)
-    small = small.filter(ImageFilter.MaxFilter(7)).filter(ImageFilter.GaussianBlur(6))
-    bg = small.resize((w, h), Image.BILINEAR)
-    return np.asarray(bg, dtype=np.float32)
+    small = _downscale(channel, _BG_TARGET)
+    if min(small.size) >= 3:
+        small = small.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.MaxFilter(3))
+    small = small.filter(ImageFilter.GaussianBlur(4))
+    return np.asarray(small.resize((w, h), Image.BILINEAR), dtype=np.uint8)
+
+
+def _gain_table() -> np.ndarray:
+    """table[b, v] = pixel v lifted by the gain that takes background b to
+    white. Backgrounds are quantised to 64 steps, an error under 2%, which
+    turns the whole normalization into one gather instead of float arithmetic
+    over every pixel of every page."""
+    bg_levels = np.arange(64, dtype=np.float32) * 4 + 2
+    values = np.arange(256, dtype=np.float32)
+    gain = np.clip(255.0 / np.maximum(bg_levels, 1.0), 1.0, _MAX_GAIN)[:, None]
+    return np.clip(values[None, :] * gain, 0, 255).astype(np.uint8)
+
+
+_GAIN_TABLE = _gain_table()
+
+
+def _normalize_channel(ch: np.ndarray, dst: np.ndarray) -> None:
+    """dst = ch scaled so its estimated background reaches white. Runs in row
+    bands so peak memory stays bounded on an outsized page."""
+    bg = estimate_background(ch)
+    rows = max(256, _BLOCK_PIXELS // max(ch.shape[1], 1))
+    for y0 in range(0, ch.shape[0], rows):
+        y1 = min(y0 + rows, ch.shape[0])
+        dst[y0:y1] = _GAIN_TABLE[bg[y0:y1] >> 2, ch[y0:y1]]
+    del bg
 
 
 def normalize_background(arr: np.ndarray) -> np.ndarray:
     """Divide each channel by its estimated background so paper becomes ~255.
     Works for HxW (gray) and HxWx3 (RGB). Gain is capped so dark figures
     are not blown out."""
-    channels = [arr] if arr.ndim == 2 else [arr[..., c] for c in range(arr.shape[2])]
-    out = []
-    for ch in channels:
-        bg = estimate_background(ch)
-        gain = np.clip(255.0 / np.maximum(bg, 1.0), 1.0, 1.8)
-        out.append(np.clip(ch.astype(np.float32) * gain, 0, 255))
-    res = out[0] if arr.ndim == 2 else np.stack(out, axis=-1)
-    return res.astype(np.uint8)
+    out = np.empty_like(arr)
+    if arr.ndim == 2:
+        _normalize_channel(arr, out)
+    else:
+        for c in range(arr.shape[2]):
+            _normalize_channel(np.ascontiguousarray(arr[..., c]), out[..., c])
+    return out
 
 
-def otsu_threshold(gray: np.ndarray) -> int:
-    hist = np.bincount(gray.ravel(), minlength=256).astype(np.float64)
+def interior(arr: np.ndarray, margin: float = _EDGE_MARGIN) -> np.ndarray:
+    """The page without its outermost band. Every measurement uses this: the
+    rim of a scan holds shadows, the edge of the platen and the neighbouring
+    page, and letting that junk set the tone curve darkens the whole result."""
+    h, w = arr.shape[:2]
+    my, mx = int(h * margin), int(w * margin)
+    if h - 2 * my < 16 or w - 2 * mx < 16:
+        return arr
+    return arr[my:h - my, mx:w - mx]
+
+
+def denoise(arr: np.ndarray) -> np.ndarray:
+    """Light median pass, used only when the tone curve is about to stretch a
+    narrow band of levels and would otherwise turn paper grain into pepper."""
+    return np.asarray(Image.fromarray(arr).filter(ImageFilter.MedianFilter(3)))
+
+
+def histogram(gray: np.ndarray) -> np.ndarray:
+    """256-bin tally of one gray page. Every page measurement is derived from
+    this instead of from boolean masks, which would copy megapixels each time."""
+    return np.bincount(gray.ravel(), minlength=256).astype(np.float64)
+
+
+def _mean_std_above(hist: np.ndarray, thr: int) -> Optional[tuple[float, float, float]]:
+    """(mean, standard deviation, count) of the levels at or above thr."""
+    tail = hist[thr:]
+    n = float(tail.sum())
+    if n <= 0:
+        return None
+    levels = np.arange(thr, 256, dtype=np.float64)
+    mean = float((tail * levels).sum() / n)
+    var = float((tail * (levels - mean) ** 2).sum() / n)
+    return mean, math.sqrt(max(var, 0.0)), n
+
+
+def _percentile_from_hist(hist: np.ndarray, q: float) -> float:
+    total = float(hist.sum())
+    if total <= 0:
+        return 0.0
+    idx = int(np.searchsorted(np.cumsum(hist), total * q / 100.0))
+    return float(min(idx, 255))
+
+
+def otsu_threshold(gray: np.ndarray, hist: Optional[np.ndarray] = None) -> int:
+    """Otsu's split point. When several thresholds tie -- which is exactly
+    what a clean scan looks like, ink and paper with an empty gap between --
+    the middle of the tied range is returned rather than its lower edge."""
+    if hist is None:
+        hist = histogram(gray)
     total = hist.sum()
     if total == 0:
         return 128
@@ -171,17 +280,69 @@ def otsu_threshold(gray: np.ndarray) -> int:
         m_b = sum_b / w_b
         m_f = (sum_all - sum_b) / w_f
         var = w_b * w_f * (m_b - m_f) ** 2
-    var[~np.isfinite(var)] = -1
-    return int(np.argmax(var))
+    var[~np.isfinite(var)] = -1.0
+    best = var.max()
+    if best <= 0:  # a flat page: no split exists
+        return 128
+    tied = np.flatnonzero(var >= best - 1e-9)
+    return int(round(float(tied.mean())))
 
 
-def auto_whiten_level(gray_norm: np.ndarray) -> int:
+def auto_whiten_level(gray_norm: np.ndarray, thr: Optional[int] = None,
+                      hist: Optional[np.ndarray] = None) -> int:
     """Whiten slider value (0..100) derived from the Otsu split of a
-    background-normalized gray image."""
-    thr = otsu_threshold(gray_norm)
+    background-normalized gray image.
+
+    The split alone is not enough. On a faint scan it lands just under the
+    paper, and a white point up there leaves half the paper below it, greyed
+    out instead of cleared. So the paper's own low tail caps it."""
+    if hist is None:
+        hist = histogram(gray_norm)
+    if thr is None:
+        thr = otsu_threshold(gray_norm, hist)
     white_point = (thr + 255) / 2.0
+    stats = _mean_std_above(hist, thr)
+    if stats is not None:
+        white_point = min(white_point, stats[0] - 3.0 * stats[1])
     white_point = max(170.0, min(250.0, white_point))
     return int(round((255.0 - white_point) / 0.95))
+
+
+def black_point_for(gray_norm: np.ndarray, thr: int, contrast: str,
+                    hist: Optional[np.ndarray] = None) -> float:
+    """Where to clip to pure black, measured from the page itself.
+
+    A fixed black point cannot rescue a washed-out scan whose ink sits at 220:
+    nothing ever reaches it. So the ink cluster is measured and the black point
+    is placed a fraction of the way from it toward the ink/paper split.
+
+    Only a page that actually looks like ink on paper is treated this way. A
+    dark plate or a full-bleed photo has no bright paper to anchor on, and
+    clipping it to the measured black would crush every detail out of it."""
+    alpha = _CONTRAST[contrast][0]
+    if hist is None:
+        hist = histogram(gray_norm)
+    total = float(hist.sum())
+    ink_count = float(hist[:thr].sum())
+    if ink_count < max(64.0, total / 2000.0):  # nothing that reads as ink
+        return _FALLBACK_BLACK
+    if ink_count > 0.5 * total:  # mostly dark page
+        return _FALLBACK_BLACK
+    stats = _mean_std_above(hist, thr)
+    if stats is None or stats[0] < 170.0:  # no bright paper: not a text scan
+        return _FALLBACK_BLACK
+
+    # Read the ink level from a low percentile of the page, i.e. from stroke
+    # cores. Averaging everything below the split looks tempting but on a faint
+    # scan that set is mostly paper grain, which drags the estimate up until
+    # the tone curve collapses onto the noise and peppers the page black.
+    centre = _percentile_from_hist(hist, _INK_PERCENTILE)
+    if centre >= thr - 3:  # too little ink to locate reliably
+        return _FALLBACK_BLACK
+    black = centre + alpha * (thr - centre)
+    # Stay clear of the paper's own noise so grain never crosses into black.
+    black = min(black, stats[0] - 3.0 * stats[1])
+    return float(np.clip(black, 0.0, 250.0))
 
 
 def white_point_for(level: int) -> float:
@@ -189,39 +350,62 @@ def white_point_for(level: int) -> float:
 
 
 def apply_levels(arr: np.ndarray, white_point: float, black: float, gamma: float) -> np.ndarray:
+    # Keep a usable span between the two points: collapsing them would turn the
+    # curve into a hard threshold sitting on top of the paper grain.
+    black = min(black, white_point - _MIN_WINDOW)
     x = np.arange(256, dtype=np.float32)
     x = np.clip((x - black) / max(white_point - black, 1.0), 0.0, 1.0)
     lut = (np.power(x, gamma) * 255.0 + 0.5).astype(np.uint8)
     return lut[arr]
 
 
-def estimate_skew(gray: np.ndarray, max_angle: float = MAX_DESKEW_ANGLE) -> float:
-    """Angle (degrees, PIL rotate convention) that best aligns text rows.
-    Returns 0.0 when the page is already straight."""
-    small = np.asarray(_downscale(gray, 800))
-    norm = normalize_background(small)
-    thr = otsu_threshold(norm)
-    binary = Image.fromarray(np.where(norm < thr, 255, 0).astype(np.uint8))
-    # ignore a border band where scanner edges/shadows would dominate
+def _row_variance(binary: Image.Image, angle: float) -> float:
+    """How strongly the ink piles into rows at this angle. Text lines line up
+    into sharp peaks when the page is straight, so the variance peaks there."""
+    rotated = binary.rotate(angle, resample=Image.NEAREST, expand=False, fillcolor=0)
+    rows = np.asarray(rotated, dtype=np.float32).sum(axis=1)
+    return float(rows.var())
+
+
+def _ink_mask(gray: np.ndarray, target: int, normalized: bool) -> Optional[Image.Image]:
+    small = np.asarray(_downscale(gray, target))
+    if not normalized:
+        small = normalize_background(small)
+    thr = otsu_threshold(small)
+    binary = Image.fromarray(np.where(small < thr, 255, 0).astype(np.uint8))
+    # ignore a border band where scanner edges and shadows would dominate
     w, h = binary.size
     binary = binary.crop((int(w * 0.05), int(h * 0.05), int(w * 0.95), int(h * 0.95)))
-    if binary.size[0] < 20 or binary.size[1] < 20:
+    return binary if min(binary.size) >= 20 else None
+
+
+def _refine_angle(binary: Image.Image, angles, best: float, best_score: float) -> tuple[float, float]:
+    for ang in angles:
+        score = _row_variance(binary, float(ang))
+        if score > best_score:
+            best, best_score = float(ang), score
+    return best, best_score
+
+
+def estimate_skew(gray: np.ndarray, max_angle: float = MAX_DESKEW_ANGLE,
+                  normalized: bool = False) -> float:
+    """Angle (degrees, PIL rotate convention) that best aligns text rows.
+    Returns 0.0 when the page is already straight.
+
+    Searched coarsely on a small copy first, then refined on a larger one, so
+    the expensive rotations only happen near the answer."""
+    coarse = _ink_mask(gray, 360, normalized)
+    if coarse is None:
         return 0.0
-
-    def score(angle: float) -> float:
-        r = binary.rotate(angle, resample=Image.NEAREST, expand=False, fillcolor=0)
-        rows = np.asarray(r, dtype=np.float32).sum(axis=1)
-        return float(rows.var())
-
-    best, best_score = 0.0, score(0.0)
-    for ang in np.arange(-max_angle, max_angle + 1e-6, 0.5):
-        s = score(float(ang))
-        if s > best_score:
-            best, best_score = float(ang), s
-    for ang in np.arange(best - 0.4, best + 0.4 + 1e-6, 0.1):
-        s = score(float(ang))
-        if s > best_score:
-            best, best_score = float(ang), s
+    best, _ = _refine_angle(coarse, np.arange(-max_angle, max_angle + 1e-6, 1.0),
+                            0.0, _row_variance(coarse, 0.0))
+    fine = _ink_mask(gray, 760, normalized)
+    if fine is None:
+        return round(best, 2) if abs(best) >= 0.15 else 0.0
+    best_score = _row_variance(fine, best)
+    best, best_score = _refine_angle(fine, np.arange(best - 1.0, best + 1.0 + 1e-6, 0.25),
+                                     best, best_score)
+    best, _ = _refine_angle(fine, np.arange(best - 0.2, best + 0.2 + 1e-6, 0.1), best, best_score)
     return round(best, 2) if abs(best) >= 0.15 else 0.0
 
 
@@ -235,17 +419,30 @@ def process_image(img: Image.Image, opts: Options) -> tuple[Image.Image, int]:
         img = img.convert("L")
         fill = 255
 
-    if opts.deskew:
-        gray = np.asarray(img if img.mode == "L" else img.convert("L"))
-        angle = estimate_skew(gray)
-        if angle:
-            img = img.rotate(angle, resample=Image.BICUBIC, expand=False, fillcolor=fill)
-
+    # Normalize first, then straighten: the skew search can reuse the evened-out
+    # page instead of normalizing its own copy, and the corners the rotation
+    # fills stay pure white instead of being pulled back toward grey.
     arr = normalize_background(np.asarray(img))
+    if opts.deskew:
+        gray = arr if arr.ndim == 2 else np.asarray(Image.fromarray(arr).convert("L"))
+        angle = estimate_skew(gray, normalized=True)
+        if angle:
+            # Bilinear, not bicubic: for a tilt of a few degrees the two are
+            # indistinguishable on text, and this one is three times quicker.
+            arr = np.asarray(Image.fromarray(arr).rotate(
+                angle, resample=Image.BILINEAR, expand=False, fillcolor=fill))
+
     gray_norm = arr if arr.ndim == 2 else np.asarray(Image.fromarray(arr).convert("L"))
-    level = opts.whiten if opts.whiten != WHITEN_AUTO else auto_whiten_level(gray_norm)
-    black, gamma = _CONTRAST[opts.contrast]
-    arr = apply_levels(arr, white_point_for(level), black, gamma)
+    probe = interior(gray_norm)
+    hist = histogram(probe)
+    thr = otsu_threshold(probe, hist)
+    level = opts.whiten if opts.whiten != WHITEN_AUTO else auto_whiten_level(probe, thr, hist)
+    black = black_point_for(probe, thr, opts.contrast, hist)
+    white = white_point_for(level)
+    gamma = _CONTRAST[opts.contrast][1]
+    if white - black < _DENOISE_WINDOW:
+        arr = denoise(arr)
+    arr = apply_levels(arr, white, black, gamma)
 
     if opts.mode == "bw":
         thr = max(100, min(200, otsu_threshold(arr)))
@@ -270,6 +467,8 @@ def probe_first_page(doc: pymupdf.Document, opts: Options) -> tuple[Image.Image,
     """Process page 1 only. Returns (original, result, encoded bytes,
     seconds taken, whiten level used). Used for preview and estimates."""
     opts = opts.validated()
+    if len(doc) == 0:
+        raise EmptyDocument(doc.name)
     t0 = time.perf_counter()
     original = render_page(doc[0], opts.dpi, opts.mode)
     result, level = process_image(original, opts)
@@ -291,10 +490,13 @@ def process_pdf(
     ``page_failed``. Raises Cancelled (writing nothing) if ``cancel`` is set."""
     opts = opts.validated()
     doc = open_pdf(input_path, password)
+    n = len(doc)
+    if n == 0:
+        doc.close()
+        raise EmptyDocument(input_path)
     out_path = output_path or output_path_for(input_path)
     out = pymupdf.open()
     failed: list[int] = []
-    n = len(doc)
     t0 = time.perf_counter()
     try:
         for i in range(n):
@@ -305,9 +507,9 @@ def process_pdf(
                 img = render_page(page, opts.dpi, opts.mode)
                 result, _ = process_image(img, opts)
                 data = encode_image(result, opts.mode)
-                w_pt = result.width * 72.0 / opts.dpi
-                h_pt = result.height * 72.0 / opts.dpi
-                new_page = out.new_page(width=w_pt, height=h_pt)
+                # Size the page from the source page, not from pixels over dpi,
+                # so geometry survives any dpi reduction on outsized pages.
+                new_page = out.new_page(width=page.rect.width, height=page.rect.height)
                 new_page.insert_image(new_page.rect, stream=data)
                 del img, result, data
             except Cancelled:

@@ -11,7 +11,9 @@
   "msg_done": "完了: {count}個のファイルを処理",
   "warn_text_pdf": "スキャンPDFではありません。続行しますか？",
   "err_password": "このファイルはパスワードで保護されています",
-
+  "err_empty_pdf": "ページのないファイルです: {name}",
+  "err_file_failed": "処理に失敗、スキップします: {name} ({error})",
+  "err_no_pdf_found": "PDFファイルが見つかりません",
   "lbl_language": "言語",
   "lbl_files": "ファイル一覧",
   "btn_add_files": "ファイル追加",
@@ -51,7 +53,6 @@
   "log_saved": "保存: {path}",
   "log_page_failed": "{name} {page}ページの処理に失敗、元のまま: {error}",
   "log_cancelled": "中止: {name} (出力なし)",
-
   "cli_desc": "黄ばんで薄いスキャンPDFの背景を白く、文字を濃く補正します。入力なしで実行するとGUIが開きます。",
   "cli_inputs": "PDFファイルまたはフォルダ (複数可)",
   "cli_whiten": "背景白化の強さ 0-100、省略時は自動",

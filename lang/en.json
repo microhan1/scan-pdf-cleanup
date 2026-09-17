@@ -11,7 +11,9 @@
   "msg_done": "Done: {count} files processed",
   "warn_text_pdf": "Not a scanned PDF. Continue anyway?",
   "err_password": "This file is password-protected",
-
+  "err_empty_pdf": "This file has no pages: {name}",
+  "err_file_failed": "Failed, skipping: {name} ({error})",
+  "err_no_pdf_found": "No PDF files found",
   "lbl_language": "Language",
   "lbl_files": "Files",
   "btn_add_files": "Add files",
@@ -51,7 +53,6 @@
   "log_saved": "Saved: {path}",
   "log_page_failed": "{name} page {page} failed, kept original: {error}",
   "log_cancelled": "Cancelled: {name} (no output written)",
-
   "cli_desc": "Clean up yellowed, faint scanned PDFs: whiten the background and darken the text. Run without inputs to open the GUI.",
   "cli_inputs": "PDF files or folders (multiple allowed)",
   "cli_whiten": "Background whitening strength 0-100, auto if omitted",

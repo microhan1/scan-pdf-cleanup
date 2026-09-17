@@ -59,9 +59,13 @@ def run_cli(args: argparse.Namespace) -> int:
     import cleanup
 
     files = cleanup.collect_pdfs(args.inputs)
+    missing = [p for p in args.inputs if not os.path.exists(p)]
+    for p in missing:
+        print(t("err_open_failed", name=p), file=sys.stderr)
     if not files:
         print(t("cli_no_input"), file=sys.stderr)
         return 2
+    failures = 0
     opts = cleanup.Options(whiten=args.whiten, contrast=args.contrast, mode=args.mode,
                            deskew=args.deskew, dpi=args.dpi).validated()
     processed = 0
@@ -71,24 +75,31 @@ def run_cli(args: argparse.Namespace) -> int:
         try:
             doc = cleanup.open_pdf(path, password)
         except cleanup.PasswordRequired:
-            print(t("err_password"), name)
+            print(f"{name}: {t('err_password')}")
             if args.yes or not sys.stdin.isatty():
                 print(t("log_skipped", name=name))
+                failures += 1
                 continue
             password = getpass.getpass(t("cli_password_prompt", name=name))
             try:
                 doc = cleanup.open_pdf(path, password)
             except cleanup.PasswordRequired:
                 print(t("err_wrong_password", name=name))
+                failures += 1
                 continue
         except Exception:
             print(t("err_open_failed", name=name), file=sys.stderr)
+            failures += 1
             continue
         try:
             scanned = cleanup.is_scanned_pdf(doc)
             pages = len(doc)
         finally:
             doc.close()
+        if pages == 0:
+            print(t("err_empty_pdf", name=name), file=sys.stderr)
+            failures += 1
+            continue
         if not scanned and not args.yes:
             answer = input(f"{name}: {t('warn_text_pdf')}{t('cli_confirm_hint')}").strip().lower()
             if answer not in ("y", "yes"):
@@ -107,12 +118,16 @@ def run_cli(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             print("\n" + t("status_cancelled"))
             return 130
+        except Exception as exc:  # one bad file must not end the batch
+            print("\n" + t("err_file_failed", name=name, error=exc), file=sys.stderr)
+            failures += 1
+            continue
         print("\n" + t("log_saved", path=result.output_path))
         if result.failed_pages:
             print(t("msg_failed_pages", count=len(result.failed_pages)))
         processed += 1
     print(t("msg_done", count=processed))
-    return 0
+    return 1 if failures else 0
 
 
 def main(argv: list[str] | None = None) -> int:

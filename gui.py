@@ -277,7 +277,11 @@ class App:
             self.add_paths([d])
 
     def add_paths(self, paths: list[str]) -> None:
-        for path in cleanup.collect_pdfs(paths):
+        found = cleanup.collect_pdfs(paths)
+        if not found:
+            self.log("err_no_pdf_found")
+            return
+        for path in found:
             if path in self.files:
                 continue
             name = os.path.basename(path)
@@ -301,11 +305,15 @@ class App:
                 self.log("log_skipped", name=name)
                 continue
             try:
+                pages = len(doc)
+                if pages == 0:
+                    messagebox.showerror(t("dlg_error"), t("err_empty_pdf", name=name), parent=self.root)
+                    self.log("err_empty_pdf", name=name)
+                    continue
                 if not cleanup.is_scanned_pdf(doc):
                     if not messagebox.askyesno(t("dlg_confirm"), f"{name}\n{t('warn_text_pdf')}", parent=self.root):
                         self.log("log_skipped", name=name)
                         continue
-                pages = len(doc)
             finally:
                 doc.close()
             self.files.append(path)
@@ -436,9 +444,10 @@ class App:
                     self.root.after(0, lambda _n=name: self.log("log_cancelled", name=_n))
                     self.root.after(0, lambda: self._finished(cancelled=True, count=count, failed=failed_total))
                     return
-                except Exception as exc:
-                    self.root.after(0, lambda _n=name, _e=exc: self.log("log_page_failed", name=_n, page=0, error=str(_e)))
+                except Exception as exc:  # one bad file must not end the batch
+                    self.root.after(0, lambda _n=name, _e=exc: self.log("err_file_failed", name=_n, error=str(_e)))
                     done_pages += self.page_counts.get(path, 0)
+                    self.root.after(0, lambda _d=done_pages: self.progress.configure(value=_d))
                     continue
                 count += 1
                 failed_total += len(result.failed_pages)
