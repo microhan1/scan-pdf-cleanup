@@ -25,6 +25,25 @@ except Exception:  # pragma: no cover - optional dependency
 PREVIEW_W, PREVIEW_H = 330, 440
 
 
+def _saved_options(settings: dict) -> Options:
+    """Options from settings.json, trusting nothing about its types. The file
+    sits beside the exe where anyone can edit it; one wrong value used to stop
+    the window from ever opening again until the file was deleted."""
+    raw = settings.get("options")
+    raw = raw if isinstance(raw, dict) else {}
+
+    def as_int(v, default: int) -> int:
+        return v if isinstance(v, int) and not isinstance(v, bool) else default
+
+    return Options(
+        whiten=as_int(raw.get("whiten"), cleanup.WHITEN_AUTO),
+        contrast=raw.get("contrast") if raw.get("contrast") in cleanup.CONTRAST_LEVELS else "mid",
+        mode=raw.get("mode") if raw.get("mode") in cleanup.MODES else "gray",
+        deskew=raw.get("deskew") if isinstance(raw.get("deskew"), bool) else True,
+        dpi=as_int(raw.get("dpi"), 200),
+    ).validated()
+
+
 class App:
     def __init__(self, initial_files: list[str] | None = None) -> None:
         self.root = TkinterDnD.Tk() if _HAS_DND else tk.Tk()
@@ -42,14 +61,13 @@ class App:
         self._photos: list[ImageTk.PhotoImage] = []
         self._texts: list[tuple[tk.Misc, str, str]] = []
 
-        settings = i18n.load_settings()
-        saved = settings.get("options", {}) if isinstance(settings.get("options"), dict) else {}
-        self.var_whiten_auto = tk.BooleanVar(value=saved.get("whiten", cleanup.WHITEN_AUTO) == cleanup.WHITEN_AUTO)
-        self.var_whiten = tk.IntVar(value=saved.get("whiten", 30) if saved.get("whiten", -1) >= 0 else 30)
-        self.var_contrast = tk.StringVar(value=saved.get("contrast", "mid"))
-        self.var_mode = tk.StringVar(value=saved.get("mode", "gray"))
-        self.var_deskew = tk.BooleanVar(value=bool(saved.get("deskew", True)))
-        self.var_dpi = tk.IntVar(value=saved.get("dpi", 200))
+        saved = _saved_options(i18n.load_settings())
+        self.var_whiten_auto = tk.BooleanVar(value=saved.whiten == cleanup.WHITEN_AUTO)
+        self.var_whiten = tk.IntVar(value=saved.whiten if saved.whiten >= 0 else 30)
+        self.var_contrast = tk.StringVar(value=saved.contrast)
+        self.var_mode = tk.StringVar(value=saved.mode)
+        self.var_deskew = tk.BooleanVar(value=saved.deskew)
+        self.var_dpi = tk.IntVar(value=saved.dpi)
         self.var_lang = tk.StringVar(value=i18n.LANG_NAMES[i18n.current_lang()])
 
         self._build()
