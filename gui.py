@@ -465,7 +465,7 @@ class App:
 
     def _finished(self, cancelled: bool, count: int, failed: int) -> None:
         self._set_controls(running=False)
-        if cancelled:
+        if cancelled or self._closing:
             self._set_status("status_cancelled")
             return
         self._set_status("status_done")
@@ -503,12 +503,26 @@ class App:
         except OSError:
             pass
 
+    _closing = False
+
     def _on_close(self) -> None:
+        self._closing = True
         self.cancel_event.set()
         try:
             self._save_options()
-        finally:
-            self.root.destroy()
+        except Exception:
+            pass
+        self._close_when_idle()
+
+    def _close_when_idle(self) -> None:
+        """Wait for the worker before tearing down. It is a daemon thread, so
+        exiting under it mid-save would leave a truncated _clean.pdf behind.
+        The cancel flag stops it at the next page; a save already running is
+        allowed to finish."""
+        if self.worker and self.worker.is_alive():
+            self.root.after(100, self._close_when_idle)
+            return
+        self.root.destroy()
 
     def mainloop(self) -> None:
         self.root.mainloop()

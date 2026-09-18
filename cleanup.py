@@ -303,12 +303,16 @@ def probe_faint(gray_norm: np.ndarray, scale: float = 1.0) -> FaintProbe:
     return FaintProbe((paper - ink) / grain, src, paper, grain)
 
 
-def box_count(mask: np.ndarray, r: int) -> np.ndarray:
-    """How many True pixels lie in the (2r+1) square around each pixel."""
-    a = np.pad(mask.astype(np.int32), ((r + 1, r), (r + 1, r)))
-    c = a.cumsum(0).cumsum(1)
-    k = 2 * r + 1
-    return c[k:, k:] - c[:-k, k:] - c[k:, :-k] + c[:-k, :-k]
+def has_company(mask: np.ndarray, r: int, n: float) -> np.ndarray:
+    """True where at least n True pixels lie in the (2r+1) square around.
+
+    Counted with PIL's box filter on a uint8 copy, one byte per pixel; an
+    integral image would need several int32 page-size arrays. The box mean is
+    rounded to whole levels, so the cut sits half a count below n."""
+    area = (2 * r + 1) ** 2
+    img = Image.fromarray(mask.astype(np.uint8) * 255)
+    mean = np.asarray(img.filter(ImageFilter.BoxBlur(r)))
+    return mean >= (n - 0.5) * 255.0 / area
 
 
 def _dilate(mask: np.ndarray) -> np.ndarray:
@@ -344,20 +348,27 @@ def rescue_faint(gray_norm: np.ndarray, probe: FaintProbe, contrast: str,
     A single tone curve fails here: any black point low enough to leave the
     grain alone also leaves most of the ink grey. Instead the ink is located
     first (seeds grown through connected weak pixels), then shaded against the
-    measured strength of its own stroke cores. Everything else is paper."""
-    soft = blur(gray_norm, _SOFT_SIGMA * scale).astype(np.float32)
-    paper, grain = paper_level(soft.astype(np.uint8))
-    seed = (probe.seed_paper - probe.seed_src.astype(np.float32)) / probe.seed_grain > _SEED_Z
-    seed &= box_count(seed, max(1, int(round(_SEED_RADIUS * scale)))) >= _SEED_COMPANY * scale * scale
-    weak = (paper - soft) / grain > _WEAK_Z
+    measured strength of its own stroke cores. Everything else is paper.
+
+    Everything stays uint8 or bool: each threshold becomes one comparison and
+    the shading one lookup table, so an outsized page does not grow several
+    full-size float copies."""
+    soft = blur(gray_norm, _SOFT_SIGMA * scale)
+    paper, grain = paper_level(soft)
+    seed = probe.seed_src < probe.seed_paper - _SEED_Z * probe.seed_grain
+    seed &= has_company(seed, max(1, int(round(_SEED_RADIUS * scale))), _SEED_COMPANY * scale * scale)
+    weak = soft < paper - _WEAK_Z * grain
     ink = trace_ink(seed, weak, max(1, int(round(_GROW_STEPS * scale))))
+    del seed, weak
     if int(ink.sum()) > 50:
-        core = float(np.percentile(soft[ink], _CORE_PERCENTILE))
+        core = _percentile_from_hist(histogram(soft[ink]), _CORE_PERCENTILE)
     else:
         core = paper - 3.0 * grain
     span = max(paper - core, _SPAN_FLOOR * grain)
-    dark = np.clip((paper - soft) / span * _INK_GAIN[contrast], 0.0, 1.0)
-    return np.where(ink, 255.0 * (1.0 - dark), 255.0).astype(np.uint8)
+    levels = np.arange(256, dtype=np.float32)
+    dark = np.clip((paper - levels) / span * _INK_GAIN[contrast], 0.0, 1.0)
+    lut = (255.0 * (1.0 - dark)).astype(np.uint8)
+    return np.where(ink, lut[soft], np.uint8(255))
 
 
 def looks_like_text(hist: np.ndarray, thr: int, paper_floor: float = 170.0) -> bool:
@@ -624,6 +635,10 @@ def process_image(img: Image.Image, opts: Options, scale: float = 1.0) -> tuple[
     cut = _FAINT_SNR_DIM if dim else _FAINT_SNR
     if faint is not None and faint.snr < cut:
         tone = rescue_faint(detect, faint, opts.contrast, scale)
+        if opts.whiten != WHITEN_AUTO:
+            # A hand-set whiten level still applies: anything lighter than its
+            # white point goes to paper. Level 0 leaves the traced tone as is.
+            tone = apply_levels(tone, white_point_for(level), 0.0, 1.0)
         if arr.ndim == 2:
             arr = tone
         else:
