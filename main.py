@@ -11,6 +11,7 @@ import getpass
 import os
 import sys
 
+import cleanup
 import i18n
 from i18n import t
 
@@ -36,8 +37,6 @@ def _localize_argparse() -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    import cleanup
-
     _localize_argparse()
     p = argparse.ArgumentParser(prog="scan-pdf-cleanup", description=t("cli_desc"))
     p.add_argument("inputs", nargs="*", help=t("cli_inputs"))
@@ -56,8 +55,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_cli(args: argparse.Namespace) -> int:
-    import cleanup
-
     files = cleanup.collect_pdfs(args.inputs)
     missing = [p for p in args.inputs if not os.path.exists(p)]
     for p in missing:
@@ -73,31 +70,27 @@ def run_cli(args: argparse.Namespace) -> int:
         name = os.path.basename(path)
         password = args.password
         try:
-            doc = cleanup.open_pdf(path, password)
-        except cleanup.PasswordRequired:
-            print(f"{name}: {t('err_password')}")
-            if args.yes or not sys.stdin.isatty():
-                print(t("log_skipped", name=name))
-                failures += 1
-                continue
-            password = getpass.getpass(t("cli_password_prompt", name=name))
             try:
-                doc = cleanup.open_pdf(path, password)
+                pages, scanned = cleanup.inspect_pdf(path, password)
             except cleanup.PasswordRequired:
-                print(t("err_wrong_password", name=name))
-                failures += 1
-                continue
-        except Exception:
-            print(t("err_open_failed", name=name), file=sys.stderr)
+                print(f"{name}: {t('err_password')}")
+                if args.yes or not sys.stdin.isatty():
+                    print(t("log_skipped", name=name))
+                    failures += 1
+                    continue
+                password = getpass.getpass(t("cli_password_prompt", name=name))
+                try:
+                    pages, scanned = cleanup.inspect_pdf(path, password)
+                except cleanup.PasswordRequired:
+                    print(t("err_wrong_password", name=name))
+                    failures += 1
+                    continue
+        except cleanup.EmptyDocument:
+            print(t("err_empty_pdf", name=name), file=sys.stderr)
             failures += 1
             continue
-        try:
-            scanned = cleanup.is_scanned_pdf(doc)
-            pages = len(doc)
-        finally:
-            doc.close()
-        if pages == 0:
-            print(t("err_empty_pdf", name=name), file=sys.stderr)
+        except Exception:
+            print(t("err_open_failed", name=name), file=sys.stderr)
             failures += 1
             continue
         if not scanned and not args.yes:

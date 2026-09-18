@@ -17,9 +17,7 @@ DEFAULT_LANG = "en"
 
 def resource_dir() -> str:
     """Folder holding lang/ (inside the PyInstaller bundle when frozen)."""
-    if getattr(sys, "frozen", False):
-        return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.executable)))
-    return os.path.dirname(os.path.abspath(__file__))
+    return getattr(sys, "_MEIPASS", app_dir())
 
 
 def app_dir() -> str:

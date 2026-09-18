@@ -6,6 +6,7 @@ Pages are processed one at a time so memory use stays flat.
 """
 from __future__ import annotations
 
+import functools
 import io
 import logging
 import math
@@ -31,6 +32,8 @@ WHITEN_AUTO = -1
 # Gamma darkens what is left in between.
 _CONTRAST = {"low": (0.15, 1.25), "mid": (0.35, 1.6), "high": (0.60, 2.1)}
 _FALLBACK_BLACK = 35.0  # used when a page has no ink to measure
+_PAPER_FLOOR = 170.0  # paper darker than this (on a 255 scale) is not a text page
+_WHITEN_SLOPE = 0.95  # white point = 255 - level * slope, for levels 0..100
 _INK_PERCENTILE = 1.0  # percentile of a page taken to sit inside ink strokes
 _MIN_WINDOW = 18.0  # narrowest black-to-white span the tone curve may use
 _EDGE_MARGIN = 0.06  # page edge ignored when measuring: shadows and rims live there
@@ -46,7 +49,9 @@ _FAINT_SNR = 9.0  # below: ink is traced by connectivity (hysteresis)
 # its lighting gradient on the tone-curve path, so tracing wins there longer.
 # 15 and 17 score the same on the training pages; 15 leaves fewer pages worse.
 _FAINT_SNR_DIM = 15.0
-_DIM_PAPER = 240.0  # output-copy paper below this marks the page as dim
+# Output paper under 240 means the _MAX_GAIN ceiling stopped the lift short of
+# white, i.e. a lighting gradient survived on the output copy.
+_DIM_PAPER = 240.0
 _SOFT_SIGMA = 0.7  # light blur for the weak-ink test, in scanner px
 _SEED_SIGMA = 1.2  # heavier blur used only to find sure-ink seeds, in px
 _SEED_Z = 3.5  # seeds: this many grain-sigmas under the paper
@@ -130,6 +135,19 @@ def open_pdf(path: str, password: Optional[str] = None) -> pymupdf.Document:
     return doc
 
 
+def _full_page_images(page: pymupdf.Page):
+    """Image placements covering at least 40% of the page: the scan itself."""
+    area = max(page.rect.width * page.rect.height, 1.0)
+    try:
+        infos = page.get_image_info()
+    except Exception:
+        return
+    for info in infos:
+        x0, y0, x1, y1 = info["bbox"]
+        if x1 > x0 and (x1 - x0) * (y1 - y0) >= 0.4 * area:
+            yield info
+
+
 def is_scanned_pdf(doc: pymupdf.Document, sample: int = 5) -> bool:
     """True when the first pages are dominated by full-page images.
     A text-only PDF (no big image, but extractable text) returns False."""
@@ -139,21 +157,25 @@ def is_scanned_pdf(doc: pymupdf.Document, sample: int = 5) -> bool:
     image_pages = text_pages = 0
     for i in range(n):
         page = doc[i]
-        area = max(page.rect.width * page.rect.height, 1.0)
-        big = False
-        try:
-            for info in page.get_image_info():
-                x0, y0, x1, y1 = info["bbox"]
-                if (x1 - x0) * (y1 - y0) >= 0.4 * area:
-                    big = True
-                    break
-        except Exception:
-            pass
-        if big:
+        if any(True for _ in _full_page_images(page)):
             image_pages += 1
         elif len(page.get_text("text").strip()) > 20:
             text_pages += 1
     return text_pages <= image_pages
+
+
+def inspect_pdf(path: str, password: Optional[str] = None) -> tuple[int, bool]:
+    """(page count, is a scan) for a file about to be queued. Raises
+    PasswordRequired, EmptyDocument, or whatever opening a broken file raises;
+    each front end turns those into its own prompts and messages."""
+    doc = open_pdf(path, password)
+    try:
+        pages = len(doc)
+        if pages == 0:
+            raise EmptyDocument(path)
+        return pages, is_scanned_pdf(doc)
+    finally:
+        doc.close()
 
 
 def output_path_for(input_path: str) -> str:
@@ -209,6 +231,7 @@ def estimate_background(channel: np.ndarray) -> np.ndarray:
     return np.asarray(small.resize((w, h), Image.BILINEAR), dtype=np.uint8)
 
 
+@functools.lru_cache(maxsize=None)
 def _gain_table(white: int = 255, max_gain: float = _MAX_GAIN) -> np.ndarray:
     """table[b, v] = pixel v lifted by the gain that takes background b to
     `white`. Backgrounds are quantised to 64 steps, an error under 2%, which
@@ -220,24 +243,21 @@ def _gain_table(white: int = 255, max_gain: float = _MAX_GAIN) -> np.ndarray:
     return np.clip(values[None, :] * gain, 0, 255).astype(np.uint8)
 
 
-_GAIN_TABLES = {(255, _MAX_GAIN): _gain_table(255, _MAX_GAIN)}
-
-
-def _normalize_channel(ch: np.ndarray, dst: np.ndarray, white: int, max_gain: float) -> None:
+def _normalize_channel(ch: np.ndarray, dst: np.ndarray, white: int, max_gain: float,
+                       bg: Optional[np.ndarray] = None) -> None:
     """dst = ch scaled so its estimated background reaches `white`. Runs in row
     bands so peak memory stays bounded on an outsized page."""
-    table = _GAIN_TABLES.get((white, max_gain))
-    if table is None:
-        table = _GAIN_TABLES[(white, max_gain)] = _gain_table(white, max_gain)
-    bg = estimate_background(ch)
+    table = _gain_table(white, max_gain)
+    if bg is None:
+        bg = estimate_background(ch)
     rows = max(256, _BLOCK_PIXELS // max(ch.shape[1], 1))
     for y0 in range(0, ch.shape[0], rows):
         y1 = min(y0 + rows, ch.shape[0])
         dst[y0:y1] = table[bg[y0:y1] >> 2, ch[y0:y1]]
-    del bg
 
 
-def normalize_background(arr: np.ndarray, white: int = 255, max_gain: float = _MAX_GAIN) -> np.ndarray:
+def normalize_background(arr: np.ndarray, white: int = 255, max_gain: float = _MAX_GAIN,
+                         bg: Optional[np.ndarray] = None) -> np.ndarray:
     """Divide each channel by its estimated background so paper becomes about
     `white`. Works for HxW (gray) and HxWx3 (RGB). Gain is capped so dark
     figures are not blown out.
@@ -247,10 +267,13 @@ def normalize_background(arr: np.ndarray, white: int = 255, max_gain: float = _M
     `white` to leave headroom. It also lifts a higher `max_gain`: the ceiling
     protects dark figures in what the reader sees, but on the measuring copy it
     would leave a dim page's lighting gradient in place, and a gradient read as
-    grain hides the ink."""
+    grain hides the ink.
+
+    `bg` (gray pages only) is a background already estimated from the same
+    pixels, so two normalizations of one page need estimate it only once."""
     out = np.empty_like(arr)
     if arr.ndim == 2:
-        _normalize_channel(arr, out, white, max_gain)
+        _normalize_channel(arr, out, white, max_gain, bg)
     else:
         for c in range(arr.shape[2]):
             _normalize_channel(np.ascontiguousarray(arr[..., c]), out[..., c], white, max_gain)
@@ -272,11 +295,13 @@ def blur(arr: np.ndarray, sigma: float) -> np.ndarray:
     return np.asarray(Image.fromarray(arr).filter(ImageFilter.GaussianBlur(sigma))) if sigma > 0 else arr
 
 
-def paper_level(gray: np.ndarray) -> tuple[float, float]:
+def paper_level(gray: np.ndarray, hist: Optional[np.ndarray] = None) -> tuple[float, float]:
     """(paper level, grain) of a normalized page. The level is the histogram
     peak; the grain is measured on the bright side of that peak only, so the
-    ink tail cannot pass itself off as noise."""
-    hist = histogram(interior(gray))
+    ink tail cannot pass itself off as noise. `hist` is histogram(interior(gray))
+    when the caller already has it."""
+    if hist is None:
+        hist = histogram(interior(gray))
     mode = int(np.argmax(hist))
     levels = np.arange(256, dtype=np.float64)
     upper = hist.copy()
@@ -288,7 +313,7 @@ def paper_level(gray: np.ndarray) -> tuple[float, float]:
 @dataclass
 class FaintProbe:
     snr: float
-    seed_src: np.ndarray  # page blurred at _SEED_SIGMA, reused for seeding
+    seed_src: Optional[np.ndarray]  # page blurred at _SEED_SIGMA; freed once seeded
     seed_paper: float
     seed_grain: float
 
@@ -298,8 +323,9 @@ def probe_faint(gray_norm: np.ndarray, scale: float = 1.0) -> FaintProbe:
     blurred copy: strokes survive a small blur, grain does not, so this reads
     the ink the eye would see rather than single noisy pixels."""
     src = blur(gray_norm, _SEED_SIGMA * scale)
-    paper, grain = paper_level(src)
-    ink = _percentile_from_hist(histogram(interior(src)), _INK_PERCENTILE)
+    hist = histogram(interior(src))
+    paper, grain = paper_level(src, hist)
+    ink = _percentile_from_hist(hist, _INK_PERCENTILE)
     return FaintProbe((paper - ink) / grain, src, paper, grain)
 
 
@@ -315,15 +341,15 @@ def has_company(mask: np.ndarray, r: int, n: float) -> np.ndarray:
     return mean >= (n - 0.5) * 255.0 / area
 
 
-def _dilate(mask: np.ndarray) -> np.ndarray:
-    """3x3 dilation from shifted copies; far quicker than a rank filter."""
-    v = mask.copy()
-    v[1:] |= mask[:-1]
-    v[:-1] |= mask[1:]
-    out = v.copy()
-    out[:, 1:] |= v[:, :-1]
-    out[:, :-1] |= v[:, 1:]
-    return out
+def _dilate_into(src: np.ndarray, tmp: np.ndarray, dst: np.ndarray) -> None:
+    """dst = 3x3 dilation of src, from shifted copies into reused buffers;
+    far quicker than a rank filter and allocates nothing per step."""
+    np.copyto(tmp, src)
+    tmp[1:] |= src[:-1]
+    tmp[:-1] |= src[1:]
+    np.copyto(dst, tmp)
+    dst[:, 1:] |= tmp[:, :-1]
+    dst[:, :-1] |= tmp[:, 1:]
 
 
 def trace_ink(seed: np.ndarray, weak: np.ndarray, steps: int) -> np.ndarray:
@@ -331,13 +357,16 @@ def trace_ink(seed: np.ndarray, weak: np.ndarray, steps: int) -> np.ndarray:
     is a connected run of dark pixels; a grain speck is not, so it is dropped
     however dark it happens to be."""
     cur = seed & weak
-    count = int(cur.sum())
+    nxt = np.empty_like(cur)
+    tmp = np.empty_like(cur)
+    count = np.count_nonzero(cur)
     for _ in range(steps):
-        nxt = _dilate(cur) & weak
-        new_count = int(nxt.sum())
+        _dilate_into(cur, tmp, nxt)
+        nxt &= weak
+        new_count = np.count_nonzero(nxt)
         if new_count == count:
             break
-        cur, count = nxt, new_count
+        cur, nxt, count = nxt, cur, new_count
     return cur
 
 
@@ -356,11 +385,12 @@ def rescue_faint(gray_norm: np.ndarray, probe: FaintProbe, contrast: str,
     soft = blur(gray_norm, _SOFT_SIGMA * scale)
     paper, grain = paper_level(soft)
     seed = probe.seed_src < probe.seed_paper - _SEED_Z * probe.seed_grain
+    probe.seed_src = None  # the blurred page is no longer needed; free it now
     seed &= has_company(seed, max(1, int(round(_SEED_RADIUS * scale))), _SEED_COMPANY * scale * scale)
     weak = soft < paper - _WEAK_Z * grain
     ink = trace_ink(seed, weak, max(1, int(round(_GROW_STEPS * scale))))
     del seed, weak
-    if int(ink.sum()) > 50:
+    if np.count_nonzero(ink) > 50:
         core = _percentile_from_hist(histogram(soft[ink]), _CORE_PERCENTILE)
     else:
         core = paper - 3.0 * grain
@@ -371,34 +401,46 @@ def rescue_faint(gray_norm: np.ndarray, probe: FaintProbe, contrast: str,
     return np.where(ink, lut[soft], np.uint8(255))
 
 
-def looks_like_text(hist: np.ndarray, thr: int, paper_floor: float = 170.0) -> bool:
-    """Ink on bright paper, as opposed to a plate, a photo or an empty page."""
+def looks_like_text(hist: np.ndarray, thr: int, paper_floor: float = _PAPER_FLOOR) -> bool:
+    """Ink on bright paper, as opposed to a plate, a photo or an empty page.
+    The one definition of a text page; the tone curve and the faint-ink probe
+    both ask it, each on its own copy of the page."""
     total = float(hist.sum())
     ink = float(hist[:thr].sum())
     stats = _mean_std_above(hist, thr)
     return (total > 0 and ink <= 0.5 * total and stats is not None and stats[0] >= paper_floor)
 
 
-def is_text_scan(detect: np.ndarray, raw_gray: np.ndarray) -> bool:
+def raw_paper_level(raw_gray: np.ndarray) -> float:
+    """Brightness of the paper in the scan as delivered, before any lift."""
+    return _percentile_from_hist(histogram(interior(raw_gray)), 90.0)
+
+
+def is_text_scan(detect: np.ndarray, raw_paper: float) -> bool:
     """Whether the faint-ink probe applies. Judged on the flattened copy, since
     on the output copy a dim page's leftover lighting gradient makes half the
     page look like ink. Real paper must also be reasonably bright in the raw
-    scan, which keeps a dark photo, lifted by the flattening, out."""
+    scan (raw_paper_level), which keeps a dark photo, lifted by the flattening,
+    out."""
     probe = interior(detect)
     hist = histogram(probe)
     thr = otsu_threshold(probe, hist)
-    raw_paper = _percentile_from_hist(histogram(interior(raw_gray)), 90.0)
-    return raw_paper >= _MIN_RAW_PAPER and looks_like_text(hist, thr, 170.0 * _DETECT_WHITE / 255.0)
+    floor = _PAPER_FLOOR * _DETECT_WHITE / 255.0  # the same floor on the copy's scale
+    return raw_paper >= _MIN_RAW_PAPER and looks_like_text(hist, thr, floor)
 
 
 def histogram(gray: np.ndarray) -> np.ndarray:
     """256-bin tally of one gray page. Every page measurement is derived from
-    this instead of from boolean masks, which would copy megapixels each time."""
+    this instead of from boolean masks, which would copy megapixels each time.
+    A 2-D page goes through Pillow, three times quicker than bincount on the
+    strided view that interior() returns."""
+    if gray.ndim == 2 and gray.dtype == np.uint8:
+        return np.asarray(Image.fromarray(gray).histogram(), dtype=np.float64)
     return np.bincount(gray.ravel(), minlength=256).astype(np.float64)
 
 
-def _mean_std_above(hist: np.ndarray, thr: int) -> Optional[tuple[float, float, float]]:
-    """(mean, standard deviation, count) of the levels at or above thr."""
+def _mean_std_above(hist: np.ndarray, thr: int) -> Optional[tuple[float, float]]:
+    """(mean, standard deviation) of the levels at or above thr."""
     tail = hist[thr:]
     n = float(tail.sum())
     if n <= 0:
@@ -406,7 +448,7 @@ def _mean_std_above(hist: np.ndarray, thr: int) -> Optional[tuple[float, float, 
     levels = np.arange(thr, 256, dtype=np.float64)
     mean = float((tail * levels).sum() / n)
     var = float((tail * (levels - mean) ** 2).sum() / n)
-    return mean, math.sqrt(max(var, 0.0)), n
+    return mean, math.sqrt(max(var, 0.0))
 
 
 def _percentile_from_hist(hist: np.ndarray, q: float) -> float:
@@ -459,8 +501,7 @@ def auto_whiten_level(gray_norm: np.ndarray, thr: Optional[int] = None,
     stats = _mean_std_above(hist, thr)
     if stats is not None:
         white_point = min(white_point, stats[0] - 3.0 * stats[1])
-    white_point = max(170.0, min(250.0, white_point))
-    return int(round((255.0 - white_point) / 0.95))
+    return level_for_white_point(max(170.0, min(250.0, white_point)))
 
 
 def black_point_for(gray_norm: np.ndarray, thr: int, contrast: str,
@@ -477,15 +518,11 @@ def black_point_for(gray_norm: np.ndarray, thr: int, contrast: str,
     alpha = _CONTRAST[contrast][0]
     if hist is None:
         hist = histogram(gray_norm)
-    total = float(hist.sum())
-    ink_count = float(hist[:thr].sum())
-    if ink_count < max(64.0, total / 2000.0):  # nothing that reads as ink
+    if float(hist[:thr].sum()) < max(64.0, float(hist.sum()) / 2000.0):  # nothing that reads as ink
         return _FALLBACK_BLACK
-    if ink_count > 0.5 * total:  # mostly dark page
+    if not looks_like_text(hist, thr):  # a plate, a photo: no bright paper
         return _FALLBACK_BLACK
     stats = _mean_std_above(hist, thr)
-    if stats is None or stats[0] < 170.0:  # no bright paper: not a text scan
-        return _FALLBACK_BLACK
 
     # Read the ink level from a low percentile of the page, i.e. from stroke
     # cores. Averaging everything below the split looks tempting but on a faint
@@ -501,7 +538,30 @@ def black_point_for(gray_norm: np.ndarray, thr: int, contrast: str,
 
 
 def white_point_for(level: int) -> float:
-    return 255.0 - max(0, min(100, level)) * 0.95
+    return 255.0 - max(0, min(100, level)) * _WHITEN_SLOPE
+
+
+def level_for_white_point(white_point: float) -> int:
+    """The whiten slider level that white_point_for maps to white_point."""
+    return int(round((255.0 - white_point) / _WHITEN_SLOPE))
+
+
+def _rotate(arr: np.ndarray, angle: float, fill) -> np.ndarray:
+    # Bilinear, not bicubic: for a tilt of a few degrees the two are
+    # indistinguishable on text, and this one is three times quicker.
+    return np.asarray(Image.fromarray(arr).rotate(angle, resample=Image.BILINEAR, expand=False, fillcolor=fill))
+
+
+def _multiply_table() -> np.ndarray:
+    """table[b, t] = b darkened by tone t, computed with exactly the float32
+    expression it replaces, so a colour page is darkened by one gather
+    instead of two page-size float copies."""
+    b = np.arange(256, dtype=np.float32)[:, None]
+    t = np.arange(256, dtype=np.float32)[None, :] / 255.0
+    return (b * t).astype(np.uint8)
+
+
+_MULTIPLY = _multiply_table()
 
 
 def apply_levels(arr: np.ndarray, white_point: float, black: float, gamma: float) -> np.ndarray:
@@ -522,10 +582,8 @@ def _row_variance(binary: Image.Image, angle: float) -> float:
     return float(rows.var())
 
 
-def _ink_mask(gray: np.ndarray, target: int, normalized: bool) -> Optional[Image.Image]:
+def _ink_mask(gray: np.ndarray, target: int) -> Optional[Image.Image]:
     small = np.asarray(_downscale(gray, target))
-    if not normalized:
-        small = normalize_background(small)
     thr = otsu_threshold(small)
     binary = Image.fromarray(np.where(small < thr, 255, 0).astype(np.uint8))
     # ignore a border band where scanner edges and shadows would dominate
@@ -542,19 +600,19 @@ def _refine_angle(binary: Image.Image, angles, best: float, best_score: float) -
     return best, best_score
 
 
-def estimate_skew(gray: np.ndarray, max_angle: float = MAX_DESKEW_ANGLE,
-                  normalized: bool = False) -> float:
+def estimate_skew(gray: np.ndarray, max_angle: float = MAX_DESKEW_ANGLE) -> float:
     """Angle (degrees, PIL rotate convention) that best aligns text rows.
-    Returns 0.0 when the page is already straight.
+    Returns 0.0 when the page is already straight. `gray` must already be
+    background-normalized: an uneven lighting gradient reads as text lines.
 
     Searched coarsely on a small copy first, then refined on a larger one, so
     the expensive rotations only happen near the answer."""
-    coarse = _ink_mask(gray, 360, normalized)
+    coarse = _ink_mask(gray, 360)
     if coarse is None:
         return 0.0
     best, _ = _refine_angle(coarse, np.arange(-max_angle, max_angle + 1e-6, 1.0),
                             0.0, _row_variance(coarse, 0.0))
-    fine = _ink_mask(gray, 760, normalized)
+    fine = _ink_mask(gray, 760)
     if fine is None:
         return round(best, 2) if abs(best) >= 0.15 else 0.0
     best_score = _row_variance(fine, best)
@@ -567,17 +625,8 @@ def estimate_skew(gray: np.ndarray, max_angle: float = MAX_DESKEW_ANGLE,
 
 def source_dpi(page: pymupdf.Page) -> Optional[float]:
     """Resolution the page was scanned at, read from its full-page image."""
-    area = max(page.rect.width * page.rect.height, 1.0)
-    best = None
-    try:
-        for info in page.get_image_info():
-            x0, y0, x1, y1 = info["bbox"]
-            if (x1 - x0) * (y1 - y0) >= 0.4 * area and x1 > x0:
-                dpi = info["width"] / ((x1 - x0) / 72.0)
-                best = dpi if best is None else max(best, dpi)
-    except Exception:
-        return None
-    return best
+    dpis = [info["width"] / ((info["bbox"][2] - info["bbox"][0]) / 72.0) for info in _full_page_images(page)]
+    return max(dpis) if dpis else None
 
 
 def upsample_factor(page: pymupdf.Page, render_dpi: int) -> float:
@@ -601,26 +650,25 @@ def process_image(img: Image.Image, opts: Options, scale: float = 1.0) -> tuple[
         img = img.convert("L")
         fill = 255
     raw_gray = np.asarray(img if img.mode == "L" else img.convert("L"))
+    raw_paper = raw_paper_level(raw_gray)
 
     # Normalize first, then straighten, so the corners the rotation fills stay
     # pure white instead of being pulled back toward grey.
-    arr = normalize_background(np.asarray(img))
-    # A measuring copy: paper below white so its grain is not clipped, and a
-    # higher lift so a dim page's lighting is flattened. The skew search and
-    # the faint-ink probe both read this one; on a dim, faint page the output
-    # copy still carries a lighting gradient that the skew search mistook for
-    # text lines, reading -6.2 degrees on a page tilted -1.4.
-    detect = normalize_background(raw_gray, white=_DETECT_WHITE, max_gain=_DETECT_MAX_GAIN)
-    angle = 0.0
-    if opts.deskew:
-        angle = estimate_skew(detect, normalized=True)
-        if angle:
-            # Bilinear, not bicubic: for a tilt of a few degrees the two are
-            # indistinguishable on text, and this one is three times quicker.
-            arr = np.asarray(Image.fromarray(arr).rotate(
-                angle, resample=Image.BILINEAR, expand=False, fillcolor=fill))
-            detect = np.asarray(Image.fromarray(detect).rotate(
-                angle, resample=Image.BILINEAR, expand=False, fillcolor=_DETECT_WHITE))
+    # Two copies: the output copy the reader sees, and a measuring copy with
+    # paper below white so its grain is not clipped and a higher lift so a dim
+    # page's lighting is flattened. The skew search and the faint-ink probe
+    # read the measuring copy; on a dim, faint page the output copy still
+    # carries a lighting gradient that the skew search mistook for text lines,
+    # reading -6.2 degrees on a page tilted -1.4. A gray page's two copies come
+    # from the same pixels, so they share one background estimate.
+    bg = estimate_background(raw_gray)
+    arr = normalize_background(np.asarray(img), bg=bg if img.mode == "L" else None)
+    detect = normalize_background(raw_gray, white=_DETECT_WHITE, max_gain=_DETECT_MAX_GAIN, bg=bg)
+    del bg, raw_gray
+    angle = estimate_skew(detect) if opts.deskew else 0.0
+    if angle:
+        arr = _rotate(arr, angle, fill)
+        detect = _rotate(detect, angle, _DETECT_WHITE)
 
     gray_norm = arr if arr.ndim == 2 else np.asarray(Image.fromarray(arr).convert("L"))
     probe = interior(gray_norm)
@@ -629,26 +677,28 @@ def process_image(img: Image.Image, opts: Options, scale: float = 1.0) -> tuple[
     level = opts.whiten if opts.whiten != WHITEN_AUTO else auto_whiten_level(probe, thr, hist)
     gamma = _CONTRAST[opts.contrast][1]
 
-    faint = probe_faint(detect, scale) if is_text_scan(detect, raw_gray) else None
-    paper_stats = _mean_std_above(hist, thr)
-    dim = paper_stats is not None and paper_stats[0] < _DIM_PAPER
-    cut = _FAINT_SNR_DIM if dim else _FAINT_SNR
-    if faint is not None and faint.snr < cut:
-        tone = rescue_faint(detect, faint, opts.contrast, scale)
-        if opts.whiten != WHITEN_AUTO:
-            # A hand-set whiten level still applies: anything lighter than its
-            # white point goes to paper. Level 0 leaves the traced tone as is.
-            tone = apply_levels(tone, white_point_for(level), 0.0, 1.0)
-        if arr.ndim == 2:
-            arr = tone
-        else:
-            # Colour is kept: the traced ink darkens the page, nothing is erased.
-            base = apply_levels(arr, white_point_for(level),
-                                black_point_for(probe, thr, opts.contrast, hist), gamma)
-            arr = (base.astype(np.float32) * (tone.astype(np.float32)[..., None] / 255.0)).astype(np.uint8)
+    # Faint ink is traced rather than tone-mapped (see rescue_faint).
+    tone = None
+    faint = probe_faint(detect, scale) if is_text_scan(detect, raw_paper) else None
+    if faint is not None:
+        paper_stats = _mean_std_above(hist, thr)
+        dim = paper_stats is not None and paper_stats[0] < _DIM_PAPER
+        if faint.snr < (_FAINT_SNR_DIM if dim else _FAINT_SNR):
+            tone = rescue_faint(detect, faint, opts.contrast, scale)
+            if opts.whiten != WHITEN_AUTO:
+                # A hand-set whiten level still applies: anything lighter than
+                # its white point goes to paper. Level 0 leaves the tone as is.
+                tone = apply_levels(tone, white_point_for(level), 0.0, 1.0)
+        faint = None
+    del detect
+
+    if tone is not None and arr.ndim == 2:
+        arr = tone
     else:
-        black = black_point_for(probe, thr, opts.contrast, hist)
-        arr = apply_levels(arr, white_point_for(level), black, gamma)
+        arr = apply_levels(arr, white_point_for(level), black_point_for(probe, thr, opts.contrast, hist), gamma)
+        if tone is not None:
+            # Colour is kept: the traced ink darkens the page, nothing is erased.
+            arr = _MULTIPLY[arr, tone[..., None]]
 
     if opts.mode == "bw":
         thr = max(100, min(200, otsu_threshold(arr)))

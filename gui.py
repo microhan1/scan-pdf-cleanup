@@ -1,6 +1,7 @@
 """tkinter GUI for scan-pdf-cleanup."""
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 import sys
@@ -31,17 +32,17 @@ def _saved_options(settings: dict) -> Options:
     the window from ever opening again until the file was deleted."""
     raw = settings.get("options")
     raw = raw if isinstance(raw, dict) else {}
+    default = Options()
 
-    def as_int(v, default: int) -> int:
-        return v if isinstance(v, int) and not isinstance(v, bool) else default
+    def typed(key: str, kind: type):
+        value = raw.get(key)
+        # bool is an int subclass; a flag must not pass as a number or vice versa
+        ok = isinstance(value, kind) and (kind is bool or not isinstance(value, bool))
+        return value if ok else getattr(default, key)
 
-    return Options(
-        whiten=as_int(raw.get("whiten"), cleanup.WHITEN_AUTO),
-        contrast=raw.get("contrast") if raw.get("contrast") in cleanup.CONTRAST_LEVELS else "mid",
-        mode=raw.get("mode") if raw.get("mode") in cleanup.MODES else "gray",
-        deskew=raw.get("deskew") if isinstance(raw.get("deskew"), bool) else True,
-        dpi=as_int(raw.get("dpi"), 200),
-    ).validated()
+    # validated() then maps any unknown contrast, mode or dpi to its default.
+    return Options(whiten=typed("whiten", int), contrast=typed("contrast", str), mode=typed("mode", str),
+                   deskew=typed("deskew", bool), dpi=typed("dpi", int)).validated()
 
 
 class App:
@@ -60,6 +61,12 @@ class App:
         self.preview_gen = 0
         self._photos: list[ImageTk.PhotoImage] = []
         self._texts: list[tuple[tk.Misc, str, str]] = []
+        self._preview_images: tuple[Image.Image, Image.Image] | None = None
+        self._est_bytes: int | None = None
+        self._page_seconds = 0.0
+        self._status_key = ""
+        self._status_kwargs: dict = {}
+        self._closing = False
 
         saved = _saved_options(i18n.load_settings())
         self.var_whiten_auto = tk.BooleanVar(value=saved.whiten == cleanup.WHITEN_AUTO)
@@ -90,9 +97,7 @@ class App:
         head = ttk.Frame(root, padding=(12, 10, 12, 4))
         head.grid(row=0, column=0, sticky="ew")
         head.columnconfigure(0, weight=1)
-        self.lbl_title = ttk.Label(head, font=("", 15, "bold"))
-        self._reg(self.lbl_title, "app_title")
-        self.lbl_title.grid(row=0, column=0, sticky="w")
+        self._reg(ttk.Label(head, font=("", 15, "bold")), "app_title").grid(row=0, column=0, sticky="w")
         self._reg(ttk.Label(head), "lbl_language").grid(row=0, column=1, padx=(0, 6))
         self.cmb_lang = ttk.Combobox(
             head, state="readonly", width=10, textvariable=self.var_lang,
@@ -135,9 +140,8 @@ class App:
 
         f_whiten = self._reg(ttk.LabelFrame(opts, padding=6), "opt_whiten")
         f_whiten.pack(fill="x", pady=(0, 6))
-        self.chk_auto = self._reg(
-            ttk.Checkbutton(f_whiten, variable=self.var_whiten_auto, command=self._on_whiten_auto), "whiten_auto")
-        self.chk_auto.grid(row=0, column=0, sticky="w")
+        self._reg(ttk.Checkbutton(f_whiten, variable=self.var_whiten_auto, command=self._on_whiten_auto),
+                  "whiten_auto").grid(row=0, column=0, sticky="w")
         self.lbl_whiten_val = ttk.Label(f_whiten, width=4, anchor="e")
         self.lbl_whiten_val.grid(row=0, column=1, sticky="e")
         self.scl_whiten = ttk.Scale(f_whiten, from_=0, to=100, orient="horizontal", length=200,
@@ -158,9 +162,8 @@ class App:
             self._reg(rb, f"mode_{m}")
             rb.grid(row=i, column=0, sticky="w")
 
-        self.chk_deskew = self._reg(
-            ttk.Checkbutton(opts, variable=self.var_deskew, command=self._schedule_preview), "opt_deskew")
-        self.chk_deskew.pack(anchor="w", pady=(0, 6))
+        self._reg(ttk.Checkbutton(opts, variable=self.var_deskew, command=self._schedule_preview),
+                  "opt_deskew").pack(anchor="w", pady=(0, 6))
 
         f_dpi = self._reg(ttk.LabelFrame(opts, padding=6), "opt_dpi")
         f_dpi.pack(fill="x", pady=(0, 6))
@@ -210,8 +213,6 @@ class App:
         self.btn_run = self._reg(ttk.Button(bot, command=self.run), "btn_run")
         self.btn_run.grid(row=1, column=3, padx=(4, 0))
 
-        self._preview_images: tuple[Image.Image, Image.Image] | None = None
-        self._est_bytes: int | None = None
         self._on_whiten_auto()
         self._set_status("status_ready")
 
@@ -229,9 +230,6 @@ class App:
             self._set_status(self._status_key, **self._status_kwargs)
 
     # ------------------------------------------------------------ helpers
-    _status_key = ""
-    _status_kwargs: dict = {}
-
     def _set_status(self, key: str, **kwargs) -> None:
         self._status_key, self._status_kwargs = key, kwargs
         self.lbl_status.configure(text=t(key, **kwargs))
@@ -249,17 +247,13 @@ class App:
 
     def _save_options(self) -> None:
         settings = i18n.load_settings()
-        o = self.options()
-        settings["options"] = {"whiten": o.whiten, "contrast": o.contrast, "mode": o.mode,
-                               "deskew": o.deskew, "dpi": o.dpi}
+        settings["options"] = dataclasses.asdict(self.options())
         i18n.save_settings(settings)
 
     def _on_lang(self, _event=None) -> None:
-        name = self.var_lang.get()
-        for code, n in i18n.LANG_NAMES.items():
-            if n == name:
-                i18n.set_lang(code)
-                break
+        index = self.cmb_lang.current()
+        if index >= 0:
+            i18n.set_lang(i18n.LANGS[index])
         self._apply_texts()
 
     def _on_whiten_auto(self) -> None:
@@ -305,35 +299,32 @@ class App:
             name = os.path.basename(path)
             password = None
             try:
-                doc = cleanup.open_pdf(path)
-            except cleanup.PasswordRequired:
-                password = simpledialog.askstring(t("err_password"), t("dlg_password_prompt", name=name),
-                                                  show="*", parent=self.root)
-                if password is None:
-                    self.log("log_skipped", name=name)
-                    continue
                 try:
-                    doc = cleanup.open_pdf(path, password)
+                    pages, scanned = cleanup.inspect_pdf(path)
                 except cleanup.PasswordRequired:
-                    messagebox.showerror(t("dlg_error"), t("err_wrong_password", name=name), parent=self.root)
-                    self.log("log_skipped", name=name)
-                    continue
+                    password = simpledialog.askstring(t("err_password"), t("dlg_password_prompt", name=name),
+                                                      show="*", parent=self.root)
+                    if password is None:
+                        self.log("log_skipped", name=name)
+                        continue
+                    try:
+                        pages, scanned = cleanup.inspect_pdf(path, password)
+                    except cleanup.PasswordRequired:
+                        messagebox.showerror(t("dlg_error"), t("err_wrong_password", name=name), parent=self.root)
+                        self.log("log_skipped", name=name)
+                        continue
+            except cleanup.EmptyDocument:
+                messagebox.showerror(t("dlg_error"), t("err_empty_pdf", name=name), parent=self.root)
+                self.log("err_empty_pdf", name=name)
+                continue
             except Exception:
                 messagebox.showerror(t("dlg_error"), t("err_open_failed", name=name), parent=self.root)
                 self.log("log_skipped", name=name)
                 continue
-            try:
-                pages = len(doc)
-                if pages == 0:
-                    messagebox.showerror(t("dlg_error"), t("err_empty_pdf", name=name), parent=self.root)
-                    self.log("err_empty_pdf", name=name)
-                    continue
-                if not cleanup.is_scanned_pdf(doc):
-                    if not messagebox.askyesno(t("dlg_confirm"), f"{name}\n{t('warn_text_pdf')}", parent=self.root):
-                        self.log("log_skipped", name=name)
-                        continue
-            finally:
-                doc.close()
+            if not scanned and not messagebox.askyesno(
+                    t("dlg_confirm"), f"{name}\n{t('warn_text_pdf')}", parent=self.root):
+                self.log("log_skipped", name=name)
+                continue
             self.files.append(path)
             if password:
                 self.passwords[path] = password
@@ -372,6 +363,8 @@ class App:
         self.lbl_preview_msg.configure(text=t("preview_loading"))
 
         def work() -> None:
+            if gen != self.preview_gen:  # a newer option change already superseded this one
+                return
             try:
                 doc = cleanup.open_pdf(path, self.passwords.get(path))
                 try:
@@ -415,8 +408,6 @@ class App:
             canvas.create_image(cw // 2, ch // 2, image=photo, anchor="center")
 
     # ------------------------------------------------------------ running
-    _page_seconds = 0.0
-
     def run(self) -> None:
         if self.worker and self.worker.is_alive():
             return
@@ -427,7 +418,7 @@ class App:
         self._save_options()
         per_page = self._page_seconds or 0.4
         for path in self.files:
-            pages = self.page_counts.get(path, 0)
+            pages = self.page_counts[path]
             if pages >= cleanup.LARGE_PAGE_COUNT:
                 minutes = max(1, int(round(pages * per_page / 60)))
                 if not messagebox.askyesno(t("dlg_confirm"), t("msg_large_file", name=os.path.basename(path),
@@ -435,7 +426,7 @@ class App:
                     return
         self.cancel_event.clear()
         self.outputs = []
-        total_pages = sum(self.page_counts.get(p, 1) for p in self.files)
+        total_pages = sum(self.page_counts[p] for p in self.files)
         self.progress.configure(maximum=max(total_pages, 1), value=0)
         self._set_controls(running=True)
         files = list(self.files)
@@ -464,7 +455,7 @@ class App:
                     return
                 except Exception as exc:  # one bad file must not end the batch
                     self.root.after(0, lambda _n=name, _e=exc: self.log("err_file_failed", name=_n, error=str(_e)))
-                    done_pages += self.page_counts.get(path, 0)
+                    done_pages += self.page_counts[path]
                     self.root.after(0, lambda _d=done_pages: self.progress.configure(value=_d))
                     continue
                 count += 1
@@ -520,8 +511,6 @@ class App:
                 subprocess.Popen(["xdg-open", os.path.dirname(target)])
         except OSError:
             pass
-
-    _closing = False
 
     def _on_close(self) -> None:
         self._closing = True
