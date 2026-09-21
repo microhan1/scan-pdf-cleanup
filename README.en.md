@@ -38,9 +38,11 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 
 ## Series
 
-- Chaekgalpi Tools: [Margin Crop](https://github.com/microhan1/scan-pdf-crop) · [Two-page Split](https://github.com/microhan1/scan-pdf-split)
-- [Chaekgalpi Library](https://github.com/microhan1/chaekgalpi)
+- Chaekgalpi Tools: [Margin Crop (TrimPDF)](https://github.com/microhan1/TrimPDF) · [Two-page Split (spread-split)](https://github.com/microhan1/spread-split) · [TOC Bookmarks (pdf-toc-add)](https://github.com/microhan1/pdf-toc-add)
+- [Chaekgalpi](https://github.com/microhan1/chaekgalpi)
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+The source code is MIT. See [LICENSE](LICENSE).
+
+The exe on Releases bundles [PyMuPDF](https://github.com/pymupdf/PyMuPDF) (AGPL-3.0), so the exe as a whole is distributed under AGPL-3.0 terms. The corresponding source is this repository and the PyMuPDF repository.

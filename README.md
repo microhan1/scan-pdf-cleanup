@@ -38,9 +38,11 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 
 ## 시리즈
 
-- 책갈피 툴: [여백 자르기](https://github.com/microhan1/scan-pdf-crop) · [두쪽 나누기](https://github.com/microhan1/scan-pdf-split)
-- [책갈피 라이브러리](https://github.com/microhan1/chaekgalpi)
+- 책갈피 툴: [여백 자르기 (TrimPDF)](https://github.com/microhan1/TrimPDF) · [두쪽 나누기 (spread-split)](https://github.com/microhan1/spread-split) · [목차 책갈피 넣기 (pdf-toc-add)](https://github.com/microhan1/pdf-toc-add)
+- [책갈피](https://github.com/microhan1/chaekgalpi)
 
 ## 라이선스
 
-MIT. [LICENSE](LICENSE) 참조.
+소스 코드는 MIT입니다. [LICENSE](LICENSE) 참조.
+
+Releases의 exe에는 [PyMuPDF](https://github.com/pymupdf/PyMuPDF)(AGPL-3.0)가 함께 들어 있어, exe 전체는 AGPL-3.0 조건을 따릅니다. 해당 소스는 이 저장소와 PyMuPDF 저장소에서 받을 수 있습니다.

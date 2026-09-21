@@ -38,9 +38,11 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 
 ## 系列
 
-- 书签工具：[裁边](https://github.com/microhan1/scan-pdf-crop) · [分页](https://github.com/microhan1/scan-pdf-split)
-- [书签库](https://github.com/microhan1/chaekgalpi)
+- 书签工具：[裁边 (TrimPDF)](https://github.com/microhan1/TrimPDF) · [分页 (spread-split)](https://github.com/microhan1/spread-split) · [目录书签 (pdf-toc-add)](https://github.com/microhan1/pdf-toc-add)
+- [书签](https://github.com/microhan1/chaekgalpi)
 
 ## 许可证
 
-MIT，见 [LICENSE](LICENSE)。
+源代码采用 MIT 许可，见 [LICENSE](LICENSE)。
+
+Releases 中的 exe 包含 [PyMuPDF](https://github.com/pymupdf/PyMuPDF)（AGPL-3.0），因此 exe 整体按 AGPL-3.0 条款分发。对应源代码为本仓库及 PyMuPDF 仓库。

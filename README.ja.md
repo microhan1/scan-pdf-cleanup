@@ -38,9 +38,11 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 
 ## シリーズ
 
-- しおりツール: [余白カット](https://github.com/microhan1/scan-pdf-crop) · [見開き分割](https://github.com/microhan1/scan-pdf-split)
-- [しおりライブラリ](https://github.com/microhan1/chaekgalpi)
+- しおりツール: [余白カット (TrimPDF)](https://github.com/microhan1/TrimPDF) · [見開き分割 (spread-split)](https://github.com/microhan1/spread-split) · [目次しおり (pdf-toc-add)](https://github.com/microhan1/pdf-toc-add)
+- [しおり](https://github.com/microhan1/chaekgalpi)
 
 ## ライセンス
 
-MIT。[LICENSE](LICENSE) を参照。
+ソースコードは MIT です。[LICENSE](LICENSE) を参照。
+
+Releases の exe には [PyMuPDF](https://github.com/pymupdf/PyMuPDF)（AGPL-3.0）が同梱されているため、exe 全体は AGPL-3.0 の条件で配布されます。対応するソースはこのリポジトリと PyMuPDF のリポジトリです。
