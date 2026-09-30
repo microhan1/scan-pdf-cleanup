@@ -45,4 +45,4 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 
 The source code is MIT. See [LICENSE](LICENSE).
 
-The exe on Releases bundles [PyMuPDF](https://github.com/pymupdf/PyMuPDF) (AGPL-3.0), so the exe as a whole is distributed under AGPL-3.0 terms. The corresponding source is this repository and the PyMuPDF repository.
+The exe on Releases bundles [PyMuPDF](https://github.com/pymupdf/PyMuPDF) (AGPL-3.0), so the exe as a whole is distributed under AGPL-3.0 terms. The corresponding source is this repository and the PyMuPDF repository. The bundled components and their full license texts are in [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt).

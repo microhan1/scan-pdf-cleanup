@@ -45,4 +45,4 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 
 ソースコードは MIT です。[LICENSE](LICENSE) を参照。
 
-Releases の exe には [PyMuPDF](https://github.com/pymupdf/PyMuPDF)（AGPL-3.0）が同梱されているため、exe 全体は AGPL-3.0 の条件で配布されます。対応するソースはこのリポジトリと PyMuPDF のリポジトリです。
+Releases の exe には [PyMuPDF](https://github.com/pymupdf/PyMuPDF)（AGPL-3.0）が同梱されているため、exe 全体は AGPL-3.0 の条件で配布されます。対応するソースはこのリポジトリと PyMuPDF のリポジトリです。 exe に同梱されたコンポーネントとライセンス全文は [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) にあります。

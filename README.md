@@ -45,4 +45,4 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 
 소스 코드는 MIT입니다. [LICENSE](LICENSE) 참조.
 
-Releases의 exe에는 [PyMuPDF](https://github.com/pymupdf/PyMuPDF)(AGPL-3.0)가 함께 들어 있어, exe 전체는 AGPL-3.0 조건을 따릅니다. 해당 소스는 이 저장소와 PyMuPDF 저장소에서 받을 수 있습니다.
+Releases의 exe에는 [PyMuPDF](https://github.com/pymupdf/PyMuPDF)(AGPL-3.0)가 함께 들어 있어, exe 전체는 AGPL-3.0 조건을 따릅니다. 해당 소스는 이 저장소와 PyMuPDF 저장소에서 받을 수 있습니다. exe에 포함된 구성 요소와 라이선스 전문은 [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt)에 있습니다.
