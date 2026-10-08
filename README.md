@@ -39,7 +39,7 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 ## 시리즈
 
 - 책갈피 툴: [여백 자르기 (TrimPDF)](https://github.com/microhan1/TrimPDF) · [두쪽 나누기 (spread-split)](https://github.com/microhan1/spread-split) · [목차 책갈피 넣기 (pdf-toc-add)](https://github.com/microhan1/pdf-toc-add)
-- [책갈피 라이브러리](https://chaekgalpi.co.kr/?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=scanpdfcleanup) — 읽은 책과 독서록을 기록하는 웹 서비스. 정리한 책을 다 읽으면 한 줄 남겨 보세요.
+- [책갈피 라이브러리](https://chaekgalpi.co.kr/tools/scanpdfcleanup?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=scanpdfcleanup) — 읽은 책과 독서록을 기록하는 웹 서비스. 정리한 책을 다 읽으면 한 줄 남겨 보세요.
 
 ## 라이선스
 

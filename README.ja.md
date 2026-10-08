@@ -39,7 +39,7 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 ## シリーズ
 
 - しおりツール: [余白カット (TrimPDF)](https://github.com/microhan1/TrimPDF) · [見開き分割 (spread-split)](https://github.com/microhan1/spread-split) · [目次しおり (pdf-toc-add)](https://github.com/microhan1/pdf-toc-add)
-- [しおりライブラリ（Chaekgalpi Library）](https://chaekgalpi.co.kr/?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=scanpdfcleanup) — 読んだ本と読書記録を残すウェブサービス（韓国語のみ）
+- [しおりライブラリ（Chaekgalpi Library）](https://chaekgalpi.co.kr/tools/scanpdfcleanup?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=scanpdfcleanup) — 読んだ本と読書記録を残すウェブサービス（韓国語のみ）
 
 ## ライセンス
 
