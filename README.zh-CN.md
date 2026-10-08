@@ -39,7 +39,7 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 ## 系列
 
 - 书签工具：[裁边 (TrimPDF)](https://github.com/microhan1/TrimPDF) · [分页 (spread-split)](https://github.com/microhan1/spread-split) · [目录书签 (pdf-toc-add)](https://github.com/microhan1/pdf-toc-add)
-- [书签](https://github.com/microhan1/chaekgalpi)
+- [书签图书馆（Chaekgalpi Library）](https://chaekgalpi.co.kr/?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=scanpdfcleanup) — 记录读过的书和读书笔记的网页服务（仅韩语）
 
 ## 许可证
 

@@ -39,7 +39,7 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 ## Series
 
 - Chaekgalpi Tools: [Margin Crop (TrimPDF)](https://github.com/microhan1/TrimPDF) · [Two-page Split (spread-split)](https://github.com/microhan1/spread-split) · [TOC Bookmarks (pdf-toc-add)](https://github.com/microhan1/pdf-toc-add)
-- [Chaekgalpi](https://github.com/microhan1/chaekgalpi)
+- [Chaekgalpi Library](https://chaekgalpi.co.kr/?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=scanpdfcleanup) — a web service for logging the books you read and writing reviews (Korean only)
 
 ## License
 
