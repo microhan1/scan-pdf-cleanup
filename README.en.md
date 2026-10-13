@@ -2,7 +2,7 @@
 
 [한국어](README.md) · [中文](README.zh-CN.md) · [日本語](README.ja.md)
 
-Turns yellowed, faint scanned PDFs into white pages with dark text so they read well on a black-and-white e-reader. No server, no install, the original file is never modified.
+Turns yellowed, faint scanned PDFs into white pages with dark text so they read well on a black-and-white e-reader. No server (except the update check, which can be switched off), no install, the original file is never modified.
 
 ![Before and after](docs/before_after.png)
 
@@ -35,6 +35,13 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 - No OCR. The output is an image PDF.
 - Margin cropping and two-page splitting are separate tools. This one only handles image quality.
 - Color-photo magazines are out of scope.
+- It never downloads or replaces a new version by itself.
+
+## Checking for updates
+
+On start the tool sends only its name and version to the Chaekgalpi server (chaekgalpi.co.kr) to ask whether a newer version exists. No file is sent, it asks once a day, and you can switch it off in the settings.
+
+When there is one, a single line appears at the bottom of the window. **Update** opens the Chaekgalpi Tools page; the program never downloads or replaces anything by itself.
 
 ## Series
 

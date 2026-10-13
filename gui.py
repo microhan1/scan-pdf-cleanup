@@ -7,14 +7,18 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageTk
 
 import cleanup
 import i18n
+import prefs as prefs_mod
+import update_check
 from cleanup import Options
 from i18n import t
+from version import APP_VERSION, UPDATE_SLUG
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -24,6 +28,8 @@ except Exception:  # pragma: no cover - optional dependency
     _HAS_DND = False
 
 PREVIEW_W, PREVIEW_H = 330, 440
+NOTICE_BG = "#fff7e6"  # the one-line "new version" strip
+NOTICE_BORDER = "#e0b050"
 
 
 def _saved_options(settings: dict) -> Options:
@@ -68,6 +74,10 @@ class App:
         self._status_kwargs: dict = {}
         self._closing = False
 
+        self.prefs = prefs_mod.load()
+        self._update_info: update_check.UpdateInfo | None = None
+        self._notice_height = 0  # how much the window grew to make room for the notice
+
         saved = _saved_options(i18n.load_settings())
         self.var_whiten_auto = tk.BooleanVar(value=saved.whiten == cleanup.WHITEN_AUTO)
         self.var_whiten = tk.IntVar(value=saved.whiten if saved.whiten >= 0 else 30)
@@ -76,12 +86,14 @@ class App:
         self.var_deskew = tk.BooleanVar(value=saved.deskew)
         self.var_dpi = tk.IntVar(value=saved.dpi)
         self.var_lang = tk.StringVar(value=i18n.LANG_NAMES[i18n.current_lang()])
+        self.var_update_check = tk.BooleanVar(value=self.prefs.update_check)
 
         self._build()
         self._apply_texts()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         if initial_files:
             self.root.after(100, lambda: self.add_paths(initial_files))
+        update_check.check_async(self.root, UPDATE_SLUG, APP_VERSION, self.prefs, self._on_update_result)
 
     # ------------------------------------------------------------ building
     def _reg(self, widget: tk.Misc, key: str, attr: str = "text") -> tk.Misc:
@@ -98,12 +110,16 @@ class App:
         head.grid(row=0, column=0, sticky="ew")
         head.columnconfigure(0, weight=1)
         self._reg(ttk.Label(head, font=("", 15, "bold")), "app_title").grid(row=0, column=0, sticky="w")
-        self._reg(ttk.Label(head), "lbl_language").grid(row=0, column=1, padx=(0, 6))
+        self.chk_update = self._reg(
+            ttk.Checkbutton(head, variable=self.var_update_check, command=self._on_update_toggle),
+            "opt_update_check")
+        self.chk_update.grid(row=0, column=1, padx=(0, 16))
+        self._reg(ttk.Label(head), "lbl_language").grid(row=0, column=2, padx=(0, 6))
         self.cmb_lang = ttk.Combobox(
             head, state="readonly", width=10, textvariable=self.var_lang,
             values=[i18n.LANG_NAMES[c] for c in i18n.LANGS],
         )
-        self.cmb_lang.grid(row=0, column=2)
+        self.cmb_lang.grid(row=0, column=3)
         self.cmb_lang.bind("<<ComboboxSelected>>", self._on_lang)
 
         # ---- files
@@ -213,6 +229,16 @@ class App:
         self.btn_run = self._reg(ttk.Button(bot, command=self.run), "btn_run")
         self.btn_run.grid(row=1, column=3, padx=(4, 0))
 
+        # ---- one-line "new version" notice (gridded only when there is one)
+        self.frm_update = tk.Frame(root, bg=NOTICE_BG, highlightthickness=1, highlightbackground=NOTICE_BORDER)
+        self.frm_update.columnconfigure(0, weight=1)
+        self.lbl_update = tk.Label(self.frm_update, bg=NOTICE_BG, anchor="w")
+        self.lbl_update.grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=6)
+        self.btn_update_open = self._reg(ttk.Button(self.frm_update, command=self._update_open), "btn_update")
+        self.btn_update_open.grid(row=0, column=1, pady=5)
+        self.btn_update_later = self._reg(ttk.Button(self.frm_update, command=self._update_later), "btn_later")
+        self.btn_update_later.grid(row=0, column=2, padx=(6, 10), pady=5)
+
         self._on_whiten_auto()
         self._set_status("status_ready")
 
@@ -228,6 +254,8 @@ class App:
         self._update_est_label()
         if self._status_key:
             self._set_status(self._status_key, **self._status_kwargs)
+        if self._update_info is not None:
+            self._show_update_notice()
 
     # ------------------------------------------------------------ helpers
     def _set_status(self, key: str, **kwargs) -> None:
@@ -249,6 +277,65 @@ class App:
         settings = i18n.load_settings()
         settings["options"] = dataclasses.asdict(self.options())
         i18n.save_settings(settings)
+
+    # ------------------------------------------------- new version notice
+    def _on_update_result(self, info: update_check.UpdateInfo | None, answered: bool) -> None:
+        """Tk thread. The day is recorded only when the server answered, so a start
+        without a connection asks again next time."""
+        if self._closing:
+            return
+        if answered:
+            self.prefs.update_check_last = update_check.today()
+            prefs_mod.save(self.prefs)
+        if info is not None and self.var_update_check.get():
+            self._update_info = info
+            self._show_update_notice()
+
+    def _show_update_notice(self) -> None:
+        info = self._update_info
+        if info is None:
+            self.frm_update.grid_remove()
+            return
+        self.lbl_update.configure(text=t("update_available", latest=info.latest, current=info.current))
+        if self.frm_update.winfo_manager():
+            return
+        self.frm_update.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 10))
+        # Grow the window by the strip's height instead of taking it from the
+        # preview: the rest of the window stays exactly where the user left it.
+        self.root.update_idletasks()
+        self._notice_height = self.frm_update.winfo_reqheight() + 10
+        self.root.geometry(f"{self.root.winfo_width()}x{self.root.winfo_height() + self._notice_height}")
+
+    def _hide_update_notice(self) -> None:
+        self._update_info = None
+        if self.frm_update.winfo_manager():
+            self.frm_update.grid_remove()
+            if self._notice_height:
+                self.root.update_idletasks()
+                self.root.geometry(f"{self.root.winfo_width()}x{self.root.winfo_height() - self._notice_height}")
+        self._notice_height = 0
+
+    def _update_open(self) -> None:
+        """The tools page, never a download: the site counts and serves the download."""
+        info = self._update_info
+        if info is not None and info.url.startswith(update_check.SITE):
+            try:
+                webbrowser.open(info.url)
+            except Exception:
+                pass
+        self._hide_update_notice()
+
+    def _update_later(self) -> None:
+        if self._update_info is not None:
+            self.prefs.update_check_skipped = self._update_info.latest  # a newer one is shown again
+            prefs_mod.save(self.prefs)
+        self._hide_update_notice()
+
+    def _on_update_toggle(self) -> None:
+        self.prefs.update_check = bool(self.var_update_check.get())
+        prefs_mod.save(self.prefs)
+        if not self.prefs.update_check:
+            self._hide_update_notice()
 
     def _on_lang(self, _event=None) -> None:
         index = self.cmb_lang.current()
