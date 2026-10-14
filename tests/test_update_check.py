@@ -336,6 +336,33 @@ def test_the_english_page_is_not_a_download_link():
     assert not uc.link_for(info, "en").endswith(".exe")
 
 
+# The answer the live site sends (server v1.96), kept verbatim so a change of shape
+# is noticed here. `downloadUrl` is the one field the tool must never open: the site
+# counts the visit and serves the download, the tool does not fetch anything.
+LIVE = {"slug": UPDATE_SLUG, "name": "스요 PDF", "latest": "0.2.0", "tag": "v0.2.0",
+        "client": APP_VERSION, "updateAvailable": True, "announced": "0.2.0",
+        "url": "https://chaekgalpi.co.kr/tools/scanpdfcleanup?utm_source=app&utm_medium=update"
+               "&utm_campaign=tool_update&utm_content=scanpdfcleanup",
+        "urlEn": "https://chaekgalpi.co.kr/en/tools/scanpdfcleanup?utm_source=app&utm_medium=update"
+                 "&utm_campaign=tool_update&utm_content=scanpdfcleanup-en",
+        "downloadUrl": "https://chaekgalpi.co.kr/tools/scanpdfcleanup/download?utm_source=app",
+        "checkedAtUtc": "2026-10-14T06:58:40.5415105Z", "source": "github"}
+
+
+def test_the_live_answer_opens_a_tools_page_and_never_the_download_link():
+    info = uc.interpret(LIVE, APP_VERSION)
+    assert info.url == LIVE["url"] and info.url_en == LIVE["urlEn"]
+    opened = {uc.link_for(info, lang) for lang in ("ko", "en", "ja", "zh-CN")}
+    assert opened == {LIVE["url"], LIVE["urlEn"]}
+    assert LIVE["downloadUrl"] not in opened
+
+
+def test_fields_the_tool_does_not_know_are_ignored():
+    """`announced` and anything added later must not change what is shown."""
+    info = uc.interpret(dict(LIVE, somethingNew={"a": [1, 2]}), APP_VERSION)
+    assert info == uc.interpret(LIVE, APP_VERSION)
+
+
 @pytest.mark.parametrize("latest", ["", "   ", None, 3, "x" * 40, [], {"a": 1}])
 def test_odd_versions_show_nothing(latest):
     assert uc.interpret(dict(OK, latest=latest), APP_VERSION) is None
