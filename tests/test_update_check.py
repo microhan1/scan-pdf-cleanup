@@ -19,8 +19,10 @@ import prefs as prefs_mod  # noqa: E402
 import update_check as uc  # noqa: E402
 from version import APP_VERSION, UPDATE_SLUG  # noqa: E402
 
+REAL_THREAD = __import__("threading").Thread  # kept before any fixture swaps it out
+
 DAY = "2026-10-13"
-URL = ("https://chaekgalpi.co.kr/tools/scanpdfcleanup?utm_source=app&utm_medium=update"
+URL =("https://chaekgalpi.co.kr/tools/scanpdfcleanup?utm_source=app&utm_medium=update"
        "&utm_campaign=tool_update&utm_content=scanpdfcleanup")
 OK = {"slug": UPDATE_SLUG, "latest": "0.2.0", "tag": "v0.2.0", "client": APP_VERSION,
       "updateAvailable": True, "url": URL}
@@ -110,17 +112,98 @@ def test_check_asks_for_this_tool_and_version():
     assert calls == [(UPDATE_SLUG, APP_VERSION)]
 
 
-def test_closed_window_is_not_an_error():
-    class ClosingRoot(FakeRoot):
-        def after(self, ms, fn):
-            self.delays.append(ms)
-            if ms == 0:
-                raise RuntimeError("application has been destroyed")
-            fn()
+def test_worker_closure_holds_no_tk_object_or_callback():
+    """The thread must only fill a plain dict. When it also held `root` and the
+    App's bound method, closing the window mid-request left the worker with the
+    last reference and Tcl aborted: 'async handler deleted by the wrong thread'."""
+    captured = {}
 
-    fetcher, _ = counting(OK)
-    assert uc.check_async(ClosingRoot(), UPDATE_SLUG, APP_VERSION, prefs_mod.Prefs(), lambda *a: None,
-                          fetcher=fetcher, day=DAY) is True
+    class Root:
+        def after(self, ms, fn):
+            if ms == uc.DELAY_MS:
+                fn()
+
+    class Thread:
+        def __init__(self, target, name=None, daemon=None):
+            captured["target"] = target
+
+        def start(self):
+            pass
+
+    old, uc.threading.Thread = uc.threading.Thread, Thread
+    try:
+        uc.check_async(Root(), UPDATE_SLUG, APP_VERSION, prefs_mod.Prefs(), lambda *a: None,
+                       fetcher=lambda *a: OK, day=DAY)
+    finally:
+        uc.threading.Thread = old
+    held = [cell.cell_contents for cell in (captured["target"].__closure__ or ())]
+    held += list((captured["target"].__defaults__ or ()))
+    assert all(isinstance(v, dict) or callable(v) and v.__name__ in ("fetcher", "<lambda>") or isinstance(v, str)
+               for v in held), held
+    assert not any(isinstance(v, Root) for v in held), "the worker still holds the Tk root"
+    assert not any(getattr(v, "__self__", None) is not None for v in held), "the worker still holds a bound method"
+
+
+def test_window_closed_during_the_request_does_not_crash(tmp_path, monkeypatch):
+    """Three real runs: a window that closes while the request is still out."""
+    import subprocess
+    import sys as _sys
+    import textwrap
+    import threading as _threading
+
+    # the autouse fixture above swaps threading.Thread for an inline stub, which
+    # subprocess also uses; this test needs the real one
+    monkeypatch.setattr(_threading, "Thread", REAL_THREAD)
+
+    child = tmp_path / "close_during_request.py"
+    child.write_text(textwrap.dedent(f'''
+        import sys, time
+        sys.path.insert(0, r"{ROOT}")
+        import os
+        os.chdir(r"{ROOT}")
+        import i18n
+        i18n.init("ko"); i18n.set_lang("ko", persist=False)
+        i18n.save_settings = lambda *a, **k: None
+        import prefs as prefs_mod, update_check, gui
+        prefs_mod.save = lambda *a, **k: None
+        gui.prefs_mod.save = lambda *a, **k: None
+
+        def slow(slug, version):
+            time.sleep(3.0)
+            return {{"updateAvailable": True, "latest": "9.9.9",
+                     "url": "https://chaekgalpi.co.kr/tools/scanpdfcleanup"}}
+
+        real = update_check.check_async
+        update_check.check_async = lambda root, slug, version, prefs, on_result, **kw: real(
+            root, slug, version, prefs, on_result, fetcher=slow, day="1999-01-01", **kw)
+        real_app = gui.App
+        def closing(*a, **k):
+            inst = real_app(*a, **k)
+            inst.root.after(2200, inst.root.destroy)
+            return inst
+        gui.App = closing
+        gui.launch()
+        time.sleep(4)   # the worker finishes here, after the window is gone
+        print("ok")
+    '''), encoding="utf-8")
+
+    for _ in range(3):
+        p = subprocess.run([_sys.executable, str(child)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=120,
+                           env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+        assert p.returncode == 0, f"exit {p.returncode}: {(p.stderr or '').strip()[-200:]}"
+        assert "Tcl_AsyncDelete" not in (p.stderr or "")
+
+
+def test_a_window_that_is_already_gone_is_not_an_error():
+    class DeadRoot:
+        def after(self, ms, fn):
+            raise RuntimeError("application has been destroyed")
+
+    fetcher, calls = counting(OK)
+    assert uc.check_async(DeadRoot(), UPDATE_SLUG, APP_VERSION, prefs_mod.Prefs(), lambda *a: None,
+                          fetcher=fetcher, day=DAY) is False
+    assert calls == []
 
 
 # ------------------------------------------------------------------ what is sent
