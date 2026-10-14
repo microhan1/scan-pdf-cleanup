@@ -46,7 +46,7 @@ When there is one, a single line appears at the bottom of the window. **Update**
 ## Series
 
 - Chaekgalpi Tools: [Margin Crop (TrimPDF)](https://github.com/microhan1/TrimPDF) · [Two-page Split (spread-split)](https://github.com/microhan1/spread-split) · [TOC Bookmarks (pdf-toc-add)](https://github.com/microhan1/pdf-toc-add)
-- [Chaekgalpi Library](https://chaekgalpi.co.kr/tools/scanpdfcleanup?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=scanpdfcleanup) — a web service for logging the books you read and writing reviews (Korean only)
+- [Chaekgalpi Library](https://chaekgalpi.co.kr/en/tools/scanpdfcleanup?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=scanpdfcleanup) — a web service for logging the books you read and writing reviews (tools page in English; the reading-log service itself is in Korean)
 
 ## License
 
