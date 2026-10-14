@@ -18,6 +18,8 @@ python main.py
 
 ## 사용법
 
+![프로그램 창](docs/screenshot.png)
+
 1. PDF 파일이나 폴더를 창에 끌어다 놓습니다.
 2. 미리보기를 보며 옵션을 조정합니다 (배경 희게 · 글씨 진하게 · 색 모드 · 기울기 보정 · 해상도).
 3. **실행**을 누르면 원본 옆에 `<원본명>_clean.pdf`가 만들어집니다.
@@ -44,6 +46,10 @@ python main.py input.pdf --contrast mid --mode gray --dpi 200 --deskew
 새 버전이 있으면 창 아래에 한 줄로 알려 드립니다. [업데이트]를 누르면 책갈피 툴 페이지가 열립니다. 프로그램이 스스로 내려받거나 교체하지는 않습니다.
 
 ## 시리즈
+
+스캔본 한 파일을 세 도구에 차례로 통과시키면 이북리더기에서 또렷하게 읽힙니다. 이 저장소는 가운데 「보정」입니다.
+
+![두쪽 나누기 → 보정 → 여백 자르기](docs/workflow.png)
 
 - 책갈피 툴: [여백 자르기 (TrimPDF)](https://github.com/microhan1/TrimPDF) · [두쪽 나누기 (spread-split)](https://github.com/microhan1/spread-split) · [목차 책갈피 넣기 (pdf-toc-add)](https://github.com/microhan1/pdf-toc-add)
 - [책갈피 라이브러리](https://chaekgalpi.co.kr/tools/scanpdfcleanup?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=scanpdfcleanup) — 읽은 책과 독서록을 기록하는 웹 서비스. 정리한 책을 다 읽으면 한 줄 남겨 보세요.
