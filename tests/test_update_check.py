@@ -26,6 +26,7 @@ URL =("https://chaekgalpi.co.kr/tools/scanpdfcleanup?utm_source=app&utm_medium=u
        "&utm_campaign=tool_update&utm_content=scanpdfcleanup")
 OK = {"slug": UPDATE_SLUG, "latest": "0.2.0", "tag": "v0.2.0", "client": APP_VERSION,
       "updateAvailable": True, "url": URL}
+URL_EN = URL.replace("/tools/", "/en/tools/")
 
 
 class FakeRoot:
@@ -301,6 +302,38 @@ def test_skipped_is_compared_without_surrounding_spaces():
                                  "file:///C:/Windows/System32/cmd.exe", None, 5, ""])
 def test_only_pages_of_the_tools_site_are_opened(url):
     assert uc.interpret(dict(OK, url=url), APP_VERSION) is None
+
+
+# ------------------------------------------------- which tools page the notice opens
+def test_a_korean_screen_opens_the_korean_page():
+    info = uc.interpret(dict(OK, urlEn=URL_EN), APP_VERSION)
+    assert uc.link_for(info, "ko") == URL
+
+
+@pytest.mark.parametrize("lang", ["en", "ja", "zh-CN"])
+def test_another_language_opens_the_english_page(lang):
+    info = uc.interpret(dict(OK, urlEn=URL_EN), APP_VERSION)
+    assert info.url_en == URL_EN
+    assert uc.link_for(info, lang) == URL_EN
+
+
+@pytest.mark.parametrize("url_en", [None, "", 5, {}, "https://chaekgalpi.co.kr.evil.example/en/tools/x",
+                                   "http://chaekgalpi.co.kr/en/tools/x", "javascript:alert(1)",
+                                   "https://example.com/en/tools/x"])
+def test_without_a_usable_english_page_every_screen_opens_the_korean_one(url_en):
+    info = uc.interpret(dict(OK, urlEn=url_en), APP_VERSION)
+    assert info.url_en == ""
+    assert all(uc.link_for(info, lang) == URL for lang in ("ko", "en", "ja", "zh-CN"))
+
+
+def test_an_older_server_that_sends_no_english_page_still_works():
+    info = uc.interpret(OK, APP_VERSION)  # no urlEn key at all
+    assert uc.link_for(info, "en") == URL
+
+
+def test_the_english_page_is_not_a_download_link():
+    info = uc.interpret(dict(OK, urlEn=URL_EN), APP_VERSION)
+    assert not uc.link_for(info, "en").endswith(".exe")
 
 
 @pytest.mark.parametrize("latest", ["", "   ", None, 3, "x" * 40, [], {"a": 1}])
