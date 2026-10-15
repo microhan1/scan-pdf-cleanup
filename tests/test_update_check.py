@@ -1,5 +1,6 @@
 """Update check: once a day, off switch, silent failures, what is sent, when a notice shows.
-The network is always faked - these tests never reach the real server."""
+The network is always faked - these tests never reach the real server
+(tests/conftest.py blocks it for every test and fails any test that tries)."""
 from __future__ import annotations
 
 import io
@@ -9,6 +10,7 @@ import socket
 import sys
 import urllib.error
 import urllib.parse
+import urllib.request
 
 import pytest
 
@@ -168,6 +170,10 @@ def test_window_closed_during_the_request_does_not_crash(tmp_path, monkeypatch):
         import prefs as prefs_mod, update_check, gui
         prefs_mod.save = lambda *a, **k: None
         gui.prefs_mod.save = lambda *a, **k: None
+
+        def blocked(*a, **k):   # conftest.py does not reach this child process
+            raise AssertionError("the child must not reach the live site")
+        update_check.fetch.__kwdefaults__["opener"] = blocked
 
         def slow(slug, version):
             time.sleep(3.0)
@@ -361,6 +367,21 @@ def test_fields_the_tool_does_not_know_are_ignored():
     """`announced` and anything added later must not change what is shown."""
     info = uc.interpret(dict(LIVE, somethingNew={"a": [1, 2]}), APP_VERSION)
     assert info == uc.interpret(LIVE, APP_VERSION)
+
+
+# ------------------------------------------------------------- the guard itself
+def test_the_live_site_cannot_be_reached_from_a_test(block_live_site):
+    """conftest.py replaces the bound defaults, not just the module attributes:
+    a call that gives no opener and no fetcher must be recorded, not sent."""
+    block_live_site.expected = True  # this one tries on purpose
+    assert uc.fetch.__kwdefaults__["opener"] is urllib.request.urlopen
+    assert urllib.request.urlopen.__module__ == "conftest", "the real urlopen is still in place"
+
+    assert uc.fetch(UPDATE_SLUG, APP_VERSION) is None  # no opener given
+    assert uc.check_async.__kwdefaults__["fetcher"](UPDATE_SLUG, APP_VERSION) is None
+
+    assert len(block_live_site.calls) == 2
+    assert "chaekgalpi.co.kr" in block_live_site.calls[0]
 
 
 @pytest.mark.parametrize("latest", ["", "   ", None, 3, "x" * 40, [], {"a": 1}])
